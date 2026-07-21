@@ -8,8 +8,19 @@ version = "0.1.0"
 description = "Retriever tools package for research task and content lookup"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 authors = [
-  { name = "Dean" }
+  { name = "Dean MacGregor", email="powertrading121@gmail.com"}
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
   "cohere>=5.0.0",
@@ -24,6 +35,7 @@ dependencies = [
 dev = [
   "build>=1.2.2",
   "pytest>=8.2.0",
+  "twine>=5.1.1",
 ]
 
 [tool.pytest.ini_options]
