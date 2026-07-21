@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dean_research_tools"
+version = "0.1.0"
+description = "Retriever tools package for research task and content lookup"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Dean" }
+]
+dependencies = [
+  "cohere>=5.0.0",
+  "langchain-core>=0.3.0",
+  "orjson>=3.9.0",
+  "pgvector>=0.3.0",
+  "psycopg[binary]>=3.2.0",
+  "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2",
+  "pytest>=8.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

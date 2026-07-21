@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: dean_research_tools
+Version: 0.1.0
+Summary: Retriever tools package for research task and content lookup
+Author: Dean
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: cohere>=5.0.0
+Requires-Dist: langchain-core>=0.3.0
+Requires-Dist: orjson>=3.9.0
+Requires-Dist: pgvector>=0.3.0
+Requires-Dist: psycopg[binary]>=3.2.0
+Requires-Dist: pydantic>=2.7.0
+Provides-Extra: dev
+Requires-Dist: build>=1.2.2; extra == "dev"
+Requires-Dist: pytest>=8.2.0; extra == "dev"
+
+# dean_research_tools
+
+Python package exposing retriever tools for semantic and keyword search over research content.
