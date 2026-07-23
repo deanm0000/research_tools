@@ -116,7 +116,9 @@ class PGTools:
 
     async def __aenter__(self) -> list[StructuredTool]:
         if self.conn is None and self.pool is None:
-            self.conn = await AsyncConnection.connect(self.settings.db_dsn)
+            self.conn = await AsyncConnection.connect(
+                self.settings.db_dsn.get_secret_value()
+            )
             await ensure_pgvector_registered(self.conn)
             await self.conn.set_autocommit(True)
 
@@ -330,7 +332,8 @@ class PGTools:
             return orjson.dumps(res).decode("utf-8")
 
     async def browser_use(self, objective: str) -> str:
-        """Use a real browser to collect content and ingest it into the database.RETURN_DIRECT"""
+        """Agent that uses a real browser to ingest content into the database. It will return a new task_id from which to search.
+        In the instructions you give it, do not guess at any URLs to search. Let it find URLs.RETURN_DIRECT"""
 
         sql = SQL("""
             INSERT INTO ai_proj.browser_tasks (starting_task)

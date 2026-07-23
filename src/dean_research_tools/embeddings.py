@@ -6,15 +6,20 @@ from typing import Literal
 
 from cohere import AsyncClientV2
 
-from dean_research_tools.config import Settings
+from dean_research_tools.config import Settings, load_settings
 
 
 class EmbeddingsModel:
-    def __init__(self, settings: Settings):
-        self.settings = settings
+    def __init__(self, settings: Settings | None = None):
+        if settings is None:
+            settings = load_settings()
+
+        azure_api_key = settings.azure_api_key.get_secret_value()
+        azure_embedding_endpoint = settings.embedding_endpoint
+        self.embedding_model = settings.embedding_model
         self.co_client = AsyncClientV2(
-            api_key=self.settings.azure_openai_api_key.get_secret_value(),
-            base_url=self.settings.azure_embedding_endpoint,
+            api_key=azure_api_key,
+            base_url=azure_embedding_endpoint,
         )
 
     async def embed_texts(
@@ -26,7 +31,7 @@ class EmbeddingsModel:
         chunked = self.chunk_list(texts)
         for chunk in chunked:
             result = await self.co_client.embed(
-                model=self.settings.azure_openai_embedding_deployment,
+                model=self.embedding_model,
                 texts=chunk,
                 input_type=input_type,
                 embedding_types=["float"],

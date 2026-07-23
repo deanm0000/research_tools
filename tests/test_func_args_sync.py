@@ -1,5 +1,5 @@
 from inspect import isfunction, signature
-from typing import Any, cast, get_args
+from typing import Any, get_args
 
 from langchain_core.tools import ArgsSchema
 from pydantic import SecretStr
@@ -87,10 +87,11 @@ blank = Settings(
     db_port=1,
     db_name="b",
     db_user="c",
-    db_password="d",
-    azure_openai_api_key=SecretStr("e"),
-    azure_embedding_endpoint="f",
-    azure_openai_embedding_deployment="g",
+    db_password=SecretStr("d"),
+    azure_api_key=SecretStr("e"),
+    embedding_endpoint="f",
+    embedding_model="g",
+    azure_endpoint="h",
 )
 
 
