@@ -17,6 +17,8 @@ import dean_research_tools.models as models
 from dean_research_tools.config import Settings, load_settings
 from dean_research_tools.embeddings import EmbeddingsModel
 
+if TYPE_CHECKING:
+    from psycopg_pool import AsyncConnectionPool
 _registered_pgvector = WeakSet()
 
 
@@ -29,10 +31,6 @@ async def ensure_pgvector_registered(conn: AsyncConnection) -> None:
         return
     await register_vector_async(conn)
     _registered_pgvector.add(conn)
-
-
-if TYPE_CHECKING:
-    from psycopg_pool import AsyncConnectionPool
 
 
 AVAILABLE_TOOLS = Literal[
@@ -66,6 +64,10 @@ class PGTools:
 
     @asynccontextmanager
     async def _get_conn(self):
+        try:
+            from psycopg_pool import AsyncConnectionPool
+        except ImportError:
+            AsyncConnectionPool = None
         if self.conn_or_pool is None:
             self.conn_or_pool = await AsyncConnection.connect(
                 self.settings.db_dsn.get_secret_value()
@@ -75,7 +77,9 @@ class PGTools:
             yield self.conn_or_pool
         elif isinstance(self.conn_or_pool, AsyncConnection):
             yield self.conn_or_pool
-        elif isinstance(self.conn_or_pool, AsyncConnectionPool):
+        elif AsyncConnectionPool is not None and isinstance(
+            self.conn_or_pool, AsyncConnectionPool
+        ):
             async with self.conn_or_pool.connection() as conn:
                 yield conn
         else:
