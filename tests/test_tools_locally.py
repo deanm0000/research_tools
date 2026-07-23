@@ -67,6 +67,8 @@ async def test_semantic_search(with_env: bool):
 
 @pytest.mark.asyncio
 async def test_pool():
+    if not is_local():
+        return
     settings = read_env_file()
     assert settings is not None
     async with AsyncConnectionPool(
