@@ -6,12 +6,11 @@ from typing import TYPE_CHECKING, Literal, Sequence, get_args
 from weakref import WeakSet
 
 import orjson
-from dean_utils import Queue
 from langchain_core.tools import StructuredTool
 from pgvector import Vector
 from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
-from psycopg.rows import TupleRow, dict_row
+from psycopg.rows import dict_row
 from psycopg.sql import SQL
 
 import dean_research_tools.models as models
