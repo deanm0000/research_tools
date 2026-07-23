@@ -37,6 +37,20 @@ class Settings(BaseModel):
             f"keepalives_count=5"
         )
 
+    @staticmethod
+    def dummies() -> Settings:
+        return Settings(
+            db_host="a",
+            db_port=1,
+            db_name="b",
+            db_user="c",
+            db_password=SecretStr("d"),
+            azure_api_key=SecretStr("e"),
+            embedding_endpoint="f",
+            embedding_model="g",
+            azure_endpoint="h",
+        )
+
 
 def _require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -65,6 +79,7 @@ def load_settings(
     resolved_azure_endpoint = azure_endpoint or _require_env(
         _research_env("azure_endpoint")
     )
+
     resolved_db_host = db_host or _require_env(_research_env("db_host"))
     resolved_db_port = db_port or int(os.getenv(_research_env("db_port"), "5432"))
     resolved_db_name = db_name or _require_env(_research_env("db_name"))

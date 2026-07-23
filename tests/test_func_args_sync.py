@@ -82,22 +82,14 @@ def _parse_func_arg(annotation: str) -> set[str]:
     return {annotation}
 
 
-blank = Settings(
-    db_host="a",
-    db_port=1,
-    db_name="b",
-    db_user="c",
-    db_password=SecretStr("d"),
-    azure_api_key=SecretStr("e"),
-    embedding_endpoint="f",
-    embedding_model="g",
-    azure_endpoint="h",
-)
+blank = Settings.dummies()
 
 
 def test_get_all_tools():
     """Tests that the functions returned by _get_all_tools match the functions defined in the PGTools class."""
-    funcs_in_all = set(x.name for x in PGTools(settings=blank)._get_all_tools())
+    funcs_in_all = set(
+        x.name for x in PGTools(settings=blank, research_task_id=5)._get_all_tools()
+    )
 
     funcs_in_class = set(
         x for x in dir(PGTools) if x[0] != "_" and isfunction(getattr(PGTools, x))
@@ -129,7 +121,7 @@ def test_available_tools():
 
 def test_arg_schema_sync():
     """Tests that the function arguments defined in the PGTools class match the arguments defined in the ArgsSchema for each tool."""
-    for struct_tool in PGTools(settings=blank)._get_all_tools():
+    for struct_tool in PGTools(settings=blank, research_task_id=5)._get_all_tools():
         func_args = signature(getattr(PGTools, struct_tool.name)).parameters
         model_args = _safe_schema(struct_tool.args_schema)["properties"]
         for arg in func_args:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dean_research_tools"
-version = "0.2.0"
+version = "0.3.0"
 description = "Retriever tools package for research task and content lookup"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,7 +29,9 @@ dependencies = [
   "pgvector>=0.3.0",
   "psycopg[binary]>=3.2.0",
   "pydantic>=2.7.0",
-  "pytest-asyncio>=1.4.0"
+  "pytest-asyncio>=1.4.0",
+  "psycopg_pool>=3.3.1",
+
 ]
 
 [project.optional-dependencies]

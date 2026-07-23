@@ -6,11 +6,12 @@ from typing import TYPE_CHECKING, Literal, Sequence, get_args
 from weakref import WeakSet
 
 import orjson
+from dean_utils import Queue
 from langchain_core.tools import StructuredTool
 from pgvector import Vector
 from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
+from psycopg.rows import TupleRow, dict_row
 from psycopg.sql import SQL
 
 import dean_research_tools.models as models
@@ -51,32 +52,49 @@ class PGTools:
         include: Sequence[AVAILABLE_TOOLS] | None = None,
         exclude: Sequence[AVAILABLE_TOOLS] | None = None,
         settings: Settings | None = None,
-        conn: AsyncConnection | None = None,
-        pool: AsyncConnectionPool | None = None,
+        conn_or_pool: AsyncConnectionPool | AsyncConnection | None = None,
+        research_task_id: int,
     ):
         self.settings = settings or load_settings()
         self.include = include
         self.exclude = exclude
-        if conn is not None and pool is not None:
-            raise ValueError("Cannot specify both conn and pool")
-        self.conn = conn
-        self.pool = pool
-        self._close_conn = conn is None
+
+        self.conn_or_pool = conn_or_pool
+        self._close_conn = conn_or_pool is None
         self.embeddings = EmbeddingsModel(self.settings)
+        self.research_task_id = research_task_id
+        self.triggered_browser_use: tuple[str, Vector] | None = None
+
+    @asynccontextmanager
+    async def _get_conn(self):
+        if self.conn_or_pool is None:
+            self.conn_or_pool = await AsyncConnection.connect(
+                self.settings.db_dsn.get_secret_value()
+            )
+            await ensure_pgvector_registered(self.conn_or_pool)
+            await self.conn_or_pool.set_autocommit(True)
+            yield self.conn_or_pool
+        elif isinstance(self.conn_or_pool, AsyncConnection):
+            yield self.conn_or_pool
+        elif isinstance(self.conn_or_pool, AsyncConnectionPool):
+            async with self.conn_or_pool.connection() as conn:
+                yield conn
+        else:
+            raise ValueError("could not make connection")
 
     @asynccontextmanager
     async def _get_cur(self):
-        if self.conn is not None:
-            await ensure_pgvector_registered(self.conn)
-            async with self.conn.cursor(row_factory=dict_row) as cur:
+        async with self._get_conn() as conn:
+            await ensure_pgvector_registered(conn)
+            async with conn.cursor(row_factory=dict_row) as cur:
                 yield cur
-        elif self.pool is not None:
-            async with self.pool.connection() as conn:
-                await ensure_pgvector_registered(conn)
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    yield cur
-        else:
-            raise ValueError("No connection or pool provided")
+
+    @asynccontextmanager
+    async def _get_curt(self):
+        async with self._get_conn() as conn:
+            await ensure_pgvector_registered(conn)
+            async with conn.cursor() as cur:
+                yield cur
 
     def _get_all_tools(self) -> list[StructuredTool]:
         tools = []
@@ -115,19 +133,13 @@ class PGTools:
         return [t for t in self._get_all_tools() if t.name in tools_to_get]
 
     async def __aenter__(self) -> list[StructuredTool]:
-        if self.conn is None and self.pool is None:
-            self.conn = await AsyncConnection.connect(
-                self.settings.db_dsn.get_secret_value()
-            )
-            await ensure_pgvector_registered(self.conn)
-            await self.conn.set_autocommit(True)
-
         return self._get_tools()
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.conn is not None and self._close_conn:
-            await self.conn.close()
-            self.conn = None
+        if isinstance(self.conn_or_pool, AsyncConnection) and self._close_conn:
+            # if the user brings a pool or connection then they must close it
+            await self.conn_or_pool.close()
+            self.conn_or_pool = None
 
     async def semantic_content_search(
         self,
@@ -139,8 +151,6 @@ class PGTools:
         min_score: float = 0,
     ) -> str:
         """Search for relevant content in the browser_content table using vector similarity."""
-        if self.conn is None:
-            raise RuntimeError("PGTools must be used as an async context manager")
         if not query.strip():
             raise ValueError("query must not be empty")
         if top_k < 1:
@@ -200,7 +210,7 @@ class PGTools:
             """)
         values.append(top_k)
         sql = select + SQL(" ").join(wheres) + limit
-        async with self.conn.cursor(row_factory=dict_row) as cur:
+        async with self._get_cur() as cur:
             await cur.execute(sql, values)
             res = await cur.fetchall()
             return orjson.dumps(res).decode("utf-8")
@@ -334,16 +344,13 @@ class PGTools:
     async def browser_use(self, objective: str) -> str:
         """Agent that uses a real browser to ingest content into the database. It will return a new task_id from which to search.
         In the instructions you give it, do not guess at any URLs to search. Let it find URLs.RETURN_DIRECT"""
-
-        sql = SQL("""
-            INSERT INTO ai_proj.browser_tasks (starting_task)
-            VALUES (%s)
-            RETURNING id as task_id
-        """)
-        values = [objective]
-        # TODO invoking this needs to pause the research agent until the task is completed and then
-        # return the results of the task.
-        async with self._get_cur() as cur:
-            await cur.execute(sql, values)
-            res = await cur.fetchall()
-            return orjson.dumps(res).decode("utf-8")
+        # This function requires that the agent using it stops working when it is invoked, and waits for the browser
+        # to finish its work. The agent should then continue working after the browser task is complete.
+        query_embedding = await self.embeddings.embed_texts(
+            [objective], input_type="search_query"
+        )
+        if query_embedding is None:
+            raise ValueError("Failed to generate query embedding")
+        query_embedding = query_embedding[0]
+        self.triggered_browser_use = (objective, Vector(query_embedding))
+        return "Browser task triggered."

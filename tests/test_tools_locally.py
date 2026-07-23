@@ -57,7 +57,7 @@ async def test_semantic_search(with_env: bool):
         settings = None
     else:
         settings = read_env_file(to_env=False)
-    tools = PGTools(settings=settings)
-    async with tools as _:
-        resp = await tools.semantic_task_search("poop")
-        print(resp)
+    tools = PGTools(settings=settings, research_task_id=5)
+
+    resp = await tools.semantic_task_search("poop")
+    print(resp)
