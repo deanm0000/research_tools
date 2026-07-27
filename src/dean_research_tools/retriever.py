@@ -50,7 +50,7 @@ class PGTools:
         exclude: Sequence[AVAILABLE_TOOLS] | None = None,
         settings: Settings | None = None,
         conn_or_pool: AsyncConnectionPool | AsyncConnection | None = None,
-        research_task_id: int,
+        # research_task_id: int,
     ):
         self.settings = settings or load_settings()
         self.include = include
@@ -59,7 +59,7 @@ class PGTools:
         self.conn_or_pool = conn_or_pool
         self._close_conn = conn_or_pool is None
         self.embeddings = EmbeddingsModel(self.settings)
-        self.research_task_id = research_task_id
+        # self.research_task_id = research_task_id
         self.triggered_browser_use: tuple[str, Vector] | None = None
 
     @asynccontextmanager
@@ -310,7 +310,9 @@ class PGTools:
         top_k: int = 5,
         min_score: float = 0,
     ) -> str:
-        """Search for relevant tasks in the browser_tasks table using vector similarity."""
+        """Search for relevant tasks in the browser_tasks table using vector similarity. Your query should
+        be a natural language description of the task as if you were instructing the browser subagent to get new information.
+        """
         if not query.strip():
             raise ValueError("query must not be empty")
         if top_k < 1:

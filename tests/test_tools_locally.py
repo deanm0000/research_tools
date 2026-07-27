@@ -59,7 +59,7 @@ async def test_semantic_search(with_env: bool):
         settings = None
     else:
         settings = read_env_file(to_env=False)
-    tools = PGTools(settings=settings, research_task_id=5)
+    tools = PGTools(settings=settings)
 
     resp = await tools.semantic_task_search("poop")
     print(resp)
@@ -76,7 +76,7 @@ async def test_pool():
         connection_class=AsyncConnection,
     ) as pool:
         assert pool is not None
-        pgtools = PGTools(conn_or_pool=pool, research_task_id=5)
+        pgtools = PGTools(conn_or_pool=pool)
         async with pgtools._get_curt() as cur:
             await cur.execute("SELECT 1")
             result = await cur.fetchone()
