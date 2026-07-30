@@ -14,12 +14,12 @@ from psycopg.rows import dict_row
 from psycopg.sql import SQL
 
 import dean_research_tools.models as models
-from dean_research_tools.config import Settings, load_settings
+from dean_research_tools.config import SettingsLike, load_settings
 from dean_research_tools.embeddings import EmbeddingsModel
 
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
-_registered_pgvector = WeakSet()
+_registered_pgvector: WeakSet[AsyncConnection] = WeakSet()
 
 
 def _to_pascal_inputs(s: str) -> str:
@@ -48,17 +48,17 @@ class PGTools:
         *,
         include: Sequence[AVAILABLE_TOOLS] | None = None,
         exclude: Sequence[AVAILABLE_TOOLS] | None = None,
-        settings: Settings | None = None,
+        settings: SettingsLike | None = None,
         conn_or_pool: AsyncConnectionPool | AsyncConnection | None = None,
         # research_task_id: int,
     ):
-        self.settings = settings or load_settings()
+        self.settings = load_settings(settings)
         self.include = include
         self.exclude = exclude
 
         self.conn_or_pool = conn_or_pool
         self._close_conn = conn_or_pool is None
-        self.embeddings = EmbeddingsModel(self.settings)
+        self.embeddings = EmbeddingsModel(settings=self.settings)
         # self.research_task_id = research_task_id
         self.triggered_browser_use: tuple[str, Vector] | None = None
 

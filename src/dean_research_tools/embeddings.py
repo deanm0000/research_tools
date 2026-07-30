@@ -6,20 +6,22 @@ from typing import Literal
 
 from cohere import AsyncClientV2
 
-from dean_research_tools.config import Settings, load_settings
+from dean_research_tools.config import SettingsLike, load_settings
 
 
 class EmbeddingsModel:
-    def __init__(self, settings: Settings | None = None):
-        if settings is None:
-            settings = load_settings()
+    def __init__(
+        self,
+        *,
+        settings: SettingsLike | None = None,
+    ):
+        settings = load_settings(settings)
 
-        azure_api_key = settings.azure_api_key.get_secret_value()
-        azure_embedding_endpoint = settings.embedding_endpoint
         self.embedding_model = settings.embedding_model
+
         self.co_client = AsyncClientV2(
-            api_key=azure_api_key,
-            base_url=azure_embedding_endpoint,
+            api_key=settings.azure_api_key.get_secret_value(),
+            base_url=settings.embedding_endpoint,
         )
 
     async def embed_texts(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 
@@ -51,6 +52,20 @@ class Settings(BaseModel):
             azure_endpoint="h",
         )
 
+    @staticmethod
+    def coerce_from(settings: SettingsLike) -> Settings:
+        if isinstance(settings, Settings):
+            return settings
+        elif isinstance(settings, BaseModel):
+            return Settings.model_validate(settings.model_dump())
+        elif isinstance(settings, dict):
+            return Settings.model_validate(settings)
+        else:
+            raise ValueError(f"Cannot coerce {settings} to Settings")
+
+
+SettingsLike: TypeAlias = Settings | BaseModel | dict[str, Any]
+
 
 def _require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -64,6 +79,7 @@ def _research_env(name: str) -> str:
 
 
 def load_settings(
+    settings: SettingsLike | None = None,
     *,
     db_host: str | None = None,
     db_port: int | None = None,
@@ -74,8 +90,23 @@ def load_settings(
     azure_endpoint: str | None = None,
     embedding_endpoint: str | None = None,
     embedding_model: str | None = None,
+    **kwargs,  ## this allows destructuring of a bigger Settings object to pass in
 ) -> Settings:
     """Load settings from keyword overrides or RESEARCH_* environment variables."""
+    if settings is not None and (
+        db_host is not None
+        or db_port is not None
+        or db_name is not None
+        or db_user is not None
+        or db_password is not None
+        or azure_api_key is not None
+        or azure_endpoint is not None
+        or embedding_endpoint is not None
+        or embedding_model is not None
+    ):
+        raise ValueError("Cannot specify both settings and individual overrides")
+    if settings is not None:
+        return Settings.coerce_from(settings)
     resolved_azure_endpoint = azure_endpoint or _require_env(
         _research_env("azure_endpoint")
     )
