@@ -25,7 +25,7 @@ class SemanticContentSearchInput(BaseModel):
     query: str = Field(
         description="The search query string to be embedded with cohere and used for vector similarity search on text content."
     )
-    task_id: int | None = Field(
+    browser_task_id: int | None = Field(
         default=None,
         description=(
             "Optional task scope. Omit this for corpus-wide searches. "
@@ -65,7 +65,7 @@ class KeywordContentSearchInput(BaseModel):
         default=None,
         description=(
             "Optional URL scope. Omit this for corpus-wide searches. "
-            "It will filter for content whose URL contains this substring."
+            "It will filter for content whose URL contains this substring. If this is not provided then task_id must be provided."
         ),
     )
     doc_id: int | None = Field(

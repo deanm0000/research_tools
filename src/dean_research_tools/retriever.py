@@ -215,7 +215,7 @@ class PGTools:
     async def semantic_content_search(
         self,
         query: str,
-        task_id: int | None = None,
+        browser_task_id: int | None = None,
         url_part: str | None = None,
         doc_id: int | None = None,
         top_k: int = 5,
@@ -253,9 +253,9 @@ class PGTools:
             """)
         ]
 
-        if task_id is not None:
+        if browser_task_id is not None:
             wheres.append(SQL("AND bt.id = %s "))
-            values.append(task_id)
+            values.append(browser_task_id)
 
         if doc_id is not None:
             wheres.append(SQL("AND bc.doc_id = %s "))
@@ -288,13 +288,13 @@ class PGTools:
         """Search for relevant content in the browser_content table using keywords, it is case-insensitive.
         Must provide either a task_id or url_part to filter results."""
         if not keywords:
-            raise ValueError("keywords must not be empty")
+            return "keywords must not be empty"
         if not task_id and not url_part:
-            raise ValueError("Either task_id or url_part must be provided")
+            return "Either task_id or url_part must be provided"
         if top_k < 1:
-            raise ValueError("top_k must be >= 1")
+            return "top_k must be >= 1"
         if pages and not doc_id:
-            raise ValueError("doc_id must be provided if pages are specified")
+            return "doc_id must be provided if pages are specified"
 
         select = SQL("""
             SELECT
@@ -372,17 +372,17 @@ class PGTools:
         be a natural language description of the task as if you were instructing the browser subagent to get new information.
         """
         if not query.strip():
-            raise ValueError("query must not be empty")
+            return "query must not be empty"
         if top_k < 1:
-            raise ValueError("top_k must be >= 1")
+            return "top_k must be >= 1"
         if not (0.0 <= min_score <= 1.0):
-            raise ValueError("min_score must be between 0.0 and 1.0")
+            return "min_score must be between 0.0 and 1.0"
 
         query_embedding = await self.embeddings.embed_texts(
             [query], input_type="search_query"
         )
         if query_embedding is None:
-            raise ValueError("Failed to generate query embedding")
+            return "Failed to generate query embedding"
         query_embedding = query_embedding[0]
 
         sql = SQL("""
@@ -453,7 +453,7 @@ class PGTools:
             [objective], input_type="search_query"
         )
         if query_embedding is None:
-            raise ValueError("Failed to generate query embedding")
+            return "Failed to generate query embedding"
         query_embedding = query_embedding[0]
         self.triggered_browser_use = (objective, Vector(query_embedding))
         return "Browser task triggered."
