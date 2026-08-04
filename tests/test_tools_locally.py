@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
 
 from dean_research_tools import PGTools
 from dean_research_tools.config import load_settings
@@ -68,6 +67,8 @@ async def test_semantic_search(with_env: bool):
 async def test_pool():
     if not is_local():
         return
+    from psycopg_pool import AsyncConnectionPool
+
     settings = read_env_file()
     assert settings is not None
     async with AsyncConnectionPool(
