@@ -1,6 +1,26 @@
 from pydantic import BaseModel, Field
 
 
+class SemanticResearchSearchInput(BaseModel):
+    query: str = Field(
+        description="The search query string to be embedded with cohere and used for vector similarity search on previous research results."
+    )
+    top_k: int = Field(
+        default=5,
+        description="The number of top results to return (default is 5).",
+    )
+    min_score: float = Field(
+        default=0,
+        description="Minimum score threshold for filtering results (between 0.0 and 1.0)",
+    )
+
+
+class GetResearchResultInput(BaseModel):
+    research_task_id: int = Field(
+        description="The research_task_id from which to retrieve the associated research result details."
+    )
+
+
 class SemanticContentSearchInput(BaseModel):
     query: str = Field(
         description="The search query string to be embedded with cohere and used for vector similarity search on text content."
@@ -22,20 +42,6 @@ class SemanticContentSearchInput(BaseModel):
     doc_id: int | None = Field(
         default=None,
         description="Optional doc_id to filter the search results. If provided, only content from this document will be considered.",
-    )
-    top_k: int = Field(
-        default=5,
-        description="The number of top results to return (default is 5).",
-    )
-    min_score: float = Field(
-        default=0,
-        description="Minimum score threshold for filtering results (between 0.0 and 1.0)",
-    )
-
-
-class SemanticTaskSearchInput(BaseModel):
-    query: str = Field(
-        description="The search query string to be embedded with cohere and used for vector similarity search on previous browser tasks."
     )
     top_k: int = Field(
         default=5,
@@ -76,9 +82,34 @@ class KeywordContentSearchInput(BaseModel):
     )
 
 
-class GetTaskInput(BaseModel):
+class GetBrowserTaskInput(BaseModel):
     task_id: int = Field(
         description="The task_id from which to retrieve the associated task details."
+    )
+
+
+class SemanticBrowserTaskSearchInput(BaseModel):
+    query: str = Field(
+        description="The search query string to be embedded with cohere and used for vector similarity search on previous browser tasks."
+    )
+    top_k: int = Field(
+        default=5,
+        description="The number of top results to return (default is 5).",
+    )
+    min_score: float = Field(
+        default=0,
+        description="Minimum score threshold for filtering results (between 0.0 and 1.0)",
+        ge=0.0,
+        le=1.0,
+    )
+
+
+class WebSearchInput(BaseModel):
+    query: str = Field(description="The search query string to be used for web search.")
+    max_results: int = Field(
+        default=5,
+        description="The maximum number of search results to return (default and minimum is 5).",
+        ge=5,
     )
 
 

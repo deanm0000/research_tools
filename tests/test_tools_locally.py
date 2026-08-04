@@ -61,8 +61,7 @@ async def test_semantic_search(with_env: bool):
         settings = read_env_file(to_env=False)
     tools = PGTools(settings=settings)
 
-    resp = await tools.semantic_task_search("poop")
-    print(resp)
+    await tools.semantic_browser_task_search("poop")
 
 
 @pytest.mark.asyncio
