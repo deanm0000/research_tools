@@ -171,8 +171,10 @@ class PGTools:
     ) -> str:
         """Search for past research tasks using the semantic embedding of the query. It returns the research_task_id,
         starting_task, and the similarity score. From that information the result of research can be got with get_research_result tool."""
-        await self._validate(query, top_k=top_k, min_score=min_score)
-
+        try:
+            await self._validate(query, top_k=top_k, min_score=min_score)
+        except ValueError as e:
+            return str(e)
         query_embedding = await self.embeddings.embed_search(query)
         sql = SQL("""
             WITH emb AS (
@@ -183,6 +185,7 @@ class PGTools:
                 rt.starting_task,
                 (1 - (rt.embedding <=> emb.embedding))::double precision AS score
             FROM ai_proj.researcher_tasks rt
+            INNER JOIN ai_proj.researcher_tasks_done rtd using (id)
             CROSS JOIN emb
             WHERE (1 - (rt.embedding <=> emb.embedding))::double precision >= %s
             ORDER BY rt.embedding <=> emb.embedding
@@ -207,9 +210,11 @@ class PGTools:
         async with self._get_cur() as cur:
             await cur.execute(sql, values)
             res = await cur.fetchone()
-            assert res is not None, (
-                f"No research result found for research_task_id {research_task_id}"
-            )
+            if res is None:
+                return (
+                    f"No research result found for research_task_id {research_task_id}"
+                )
+
             return res["content"]
 
     async def semantic_content_search(
@@ -222,7 +227,10 @@ class PGTools:
         min_score: float = 0,
     ) -> str:
         """Search for relevant content in the browser_content table using vector similarity."""
-        await self._validate(query, top_k=top_k, min_score=min_score)
+        try:
+            await self._validate(query, top_k=top_k, min_score=min_score)
+        except ValueError as e:
+            return str(e)
 
         query_embedding = await self.embeddings.embed_search(query)
 
