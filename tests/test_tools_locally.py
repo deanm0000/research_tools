@@ -82,3 +82,18 @@ async def test_pool():
             result = await cur.fetchone()
             assert result is not None
             assert result[0] == 1
+
+
+@pytest.mark.parametrize("with_env", [True, False])
+@pytest.mark.asyncio
+async def test_semantic_research_search(with_env: bool):
+    if not is_local():
+        return
+    if with_env:
+        read_env_file(to_env=True)
+        settings = None
+    else:
+        settings = read_env_file(to_env=False)
+    tools = PGTools(settings=settings)
+
+    await tools.semantic_research_search("san diego ppa")

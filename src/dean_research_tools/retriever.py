@@ -179,13 +179,13 @@ class PGTools:
                 SELECT %s::vector AS embedding
                 )
             SELECT
-                id as research_task_id,
-                starting_task,
-                (1 - (bc.embedding <=> emb.embedding))::double precision AS score
-            FROM ai_proj.researcher_tasks
-            CROSS JOIN emb bc
-            WHERE (1 - (bc.embedding <=> emb.embedding))::double precision >= %s
-            ORDER BY bc.embedding <=> emb.embedding
+                rt.id as research_task_id,
+                rt.starting_task,
+                (1 - (rt.embedding <=> emb.embedding))::double precision AS score
+            FROM ai_proj.researcher_tasks rt
+            CROSS JOIN emb
+            WHERE (1 - (rt.embedding <=> emb.embedding))::double precision >= %s
+            ORDER BY rt.embedding <=> emb.embedding
             LIMIT %s
             """)
         values = [Vector(query_embedding), min_score, top_k]
