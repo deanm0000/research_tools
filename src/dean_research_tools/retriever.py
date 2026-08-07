@@ -356,7 +356,7 @@ class PGTools:
             res = await cur.fetchall()
             return orjson.dumps(res).decode("utf-8")
 
-    async def get_browser_task(self, task_id: int) -> str:
+    async def get_browser_task(self, browser_task_id: int) -> str:
         """Retrieve the starting_task for a given task_id from the browser_tasks table.
         This is the same info from semantic_task_search."""
 
@@ -366,7 +366,7 @@ class PGTools:
             WHERE id = %s
         """
         async with self._get_cur() as cur:
-            await cur.execute(sql, [task_id])
+            await cur.execute(sql, [browser_task_id])
             res = await cur.fetchone()
             return orjson.dumps(res).decode("utf-8")
 
@@ -440,21 +440,25 @@ class PGTools:
     async def browser_use(self, objective: str) -> str:
         """Browser-based ingestion agent. Given an objective, it navigates the
         web with a real browser and ingests content based on your objective into the
-        vector database for later retrieval. Returns a task_id you can use to query
+        vector database for later retrieval. Returns a browser_task_id that can be used to query
         the ingested content once ingestion completes.
 
         Before using this tool, try to find official websites using the web_search
-        tool first, then call browser_use with a specific url. If you want to ingest
-        content from multiple sites, call browser_use multiple times (one per site).
+        tool first, then call browser_use giving it a that root url. Instruct it to find any pages it needs from that point.
+        If you want to ingest content from multiple sites, call browser_use multiple times (one per site).
 
-        This agent ONLY collects and stores content — it does not read, summarize,
-        analyze, or report on what it finds. Do not phrase the objective as a
-        request for a report, summary, or answer (e.g. avoid "find and summarize
-        X"). Instead, phrase it as a content-gathering directive, e.g.:
+        This agent ONLY collects and stores content - it does not read, summarize,
+        analyze, or report on what it finds.
+
+        Do not phrase the objective as a request for a report, summary, or answer (e.g. avoid
+        "find and summarize X"). Instead, phrase it as a content-gathering directive, e.g.:
         "Go to www.example.com, navigate the site, and ingest all content related
         to ..."
 
-        After ingestion, query the vector database using the returned task_id to
+        Do not tell the agent to collect PDFs that mention a topic as it doesn't read the PDFs. Instead tell
+        it to ingest all the content that may be responsive based on what is on the page.
+
+        After ingestion, query the vector database using the returned browser_task_id to
         retrieve and reason over the content yourself.RETURN_DIRECT"""
 
         query_embedding = await self.embeddings.embed_texts(

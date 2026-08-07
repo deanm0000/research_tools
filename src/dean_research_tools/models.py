@@ -83,8 +83,8 @@ class KeywordContentSearchInput(BaseModel):
 
 
 class GetBrowserTaskInput(BaseModel):
-    task_id: int = Field(
-        description="The task_id from which to retrieve the associated task details."
+    browser_task_id: int = Field(
+        description="The browser_task_id from which to retrieve the associated task details."
     )
 
 
