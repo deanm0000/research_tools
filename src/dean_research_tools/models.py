@@ -55,7 +55,7 @@ class SemanticContentSearchInput(BaseModel):
 
 class KeywordContentSearchInput(BaseModel):
     keywords: list[str] = Field(
-        description="The keywords to search for in the text_chunk of the browser_content table. The search will be case-insensitive and will match any text_chunk that contains any of the keywords."
+        description="The keywords to search for in the text_chunk of ai_proj_browser.text_content. The search will be case-insensitive and will match any text_chunk that contains any of the keywords."
     )
     task_id: int | None = Field(
         default=None,

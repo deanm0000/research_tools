@@ -22,6 +22,7 @@ class Settings(BaseModel):
     azure_endpoint: str
     embedding_endpoint: str
     embedding_model: str
+    queue_conn_str: str
 
     @property
     def db_dsn(self) -> SecretStr:
@@ -50,6 +51,7 @@ class Settings(BaseModel):
             embedding_endpoint="f",
             embedding_model="g",
             azure_endpoint="h",
+            queue_conn_str="i",
         )
 
     @staticmethod
@@ -90,6 +92,7 @@ def load_settings(
     azure_endpoint: str | None = None,
     embedding_endpoint: str | None = None,
     embedding_model: str | None = None,
+    queue_conn_str: str | None = None,
     **kwargs,  ## this allows destructuring of a bigger Settings object to pass in
 ) -> Settings:
     """Load settings from keyword overrides or RESEARCH_* environment variables."""
@@ -103,6 +106,7 @@ def load_settings(
         or azure_endpoint is not None
         or embedding_endpoint is not None
         or embedding_model is not None
+        or queue_conn_str is not None
     ):
         raise ValueError("Cannot specify both settings and individual overrides")
     if settings is not None:
@@ -145,4 +149,5 @@ def load_settings(
         azure_endpoint=resolved_azure_endpoint,
         embedding_endpoint=resolved_embedding_endpoint,
         embedding_model=resolved_embedding_deployment,
+        queue_conn_str=queue_conn_str or _require_env(_research_env("queue_conn_str")),
     )

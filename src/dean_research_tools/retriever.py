@@ -9,12 +9,14 @@ from weakref import WeakSet
 import orjson
 from ddgs import DDGS
 from ddgs.exceptions import DDGSException
+from dean_utils import Queue
 from langchain_core.tools import StructuredTool
 from pgvector import Vector
 from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
+from pydantic import TypeAdapter
 
 import dean_research_tools.models as models
 from dean_research_tools.config import SettingsLike, load_settings
@@ -226,7 +228,7 @@ class PGTools:
         top_k: int = 5,
         min_score: float = 0,
     ) -> str:
-        """Search for relevant content in the browser_content table using vector similarity."""
+        """Search for relevant text content in ai_proj_browser.text_content using vector similarity."""
         try:
             await self._validate(query, top_k=top_k, min_score=min_score)
         except ValueError as e:
@@ -239,18 +241,18 @@ class PGTools:
                 SELECT %s::vector AS embedding
                 )
             SELECT
-                bt.id as task_id,
+                bt.task_id,
                 bc.chunk_id,
                 bc.doc_id,
-                (bc.chunk_meta->>'page')::int AS page,
-                (bc.chunk_meta->>'chunk_index')::int AS chunk_index,
+                bc.page,
+                bc.chunk_indx AS chunk_index,
                 bc.text_chunk,
                 COALESCE(bd.url, '') AS url,
                 COALESCE(bd.title, '') AS title,
                 (1 - (bc.embedding <=> emb.embedding))::double precision AS score
-            FROM ai_proj.browser_content bc
-            INNER JOIN ai_proj.browser_docs bd using (doc_id)
-            INNER JOIN ai_proj.browser_tasks bt using (id)
+            FROM ai_proj_browser.text_content bc
+            INNER JOIN ai_proj_browser.docs bd using (doc_id)
+            INNER JOIN ai_proj_browser.tasks bt using (task_id)
             CROSS JOIN emb
             """)
         values: list[Vector | int | str] = [Vector(query_embedding)]
@@ -262,7 +264,7 @@ class PGTools:
         ]
 
         if browser_task_id is not None:
-            wheres.append(SQL("AND bt.id = %s "))
+            wheres.append(SQL("AND bt.task_id = %s "))
             values.append(browser_task_id)
 
         if doc_id is not None:
@@ -293,7 +295,7 @@ class PGTools:
         pages: list[int] | None = None,
         top_k: int = 5,
     ) -> str:
-        """Search for relevant content in the browser_content table using keywords, it is case-insensitive.
+        """Search for relevant text content in ai_proj_browser.text_content using keywords, it is case-insensitive.
         Must provide either a task_id or url_part to filter results."""
         if not keywords:
             return "keywords must not be empty"
@@ -306,17 +308,17 @@ class PGTools:
 
         select = SQL("""
             SELECT
-                bt.id as task_id,
+                bt.task_id,
                 bc.chunk_id,
                 bc.doc_id,
-                (bc.chunk_meta->>'page')::int AS page,
-                (bc.chunk_meta->>'chunk_index')::int AS chunk_index,
+                bc.page,
+                bc.chunk_indx AS chunk_index,
                 bc.text_chunk,
                 COALESCE(bd.url, '') AS url,
                 COALESCE(bd.title, '') AS title
-            FROM ai_proj.browser_content bc
-            INNER JOIN ai_proj.browser_docs bd using (doc_id)
-            INNER JOIN ai_proj.browser_tasks bt using (id)
+            FROM ai_proj_browser.text_content bc
+            INNER JOIN ai_proj_browser.docs bd using (doc_id)
+            INNER JOIN ai_proj_browser.tasks bt using (task_id)
             """)
 
         wheres = [
@@ -332,20 +334,20 @@ class PGTools:
         values: list[str | int | list[str] | list[int]] = [keywords]
 
         if task_id is not None:
-            wheres.append(SQL("AND bt.id = %s"))
+            wheres.append(SQL("AND bt.task_id = %s"))
             values.append(task_id)
         if doc_id is not None:
             wheres.append(SQL("AND bc.doc_id = %s"))
             values.append(doc_id)
             if pages:
-                wheres.append(SQL("AND (bc.chunk_meta->>'page')::int = ANY(%s)"))
+                wheres.append(SQL("AND bc.page = ANY(%s)"))
                 values.append(pages)
         if url_part is not None:
             wheres.append(SQL("AND bd.url ILIKE '%%' || %s || '%%'"))
             values.append(url_part)
 
         limit = SQL("""
-                    ORDER BY doc_id, (bc.chunk_meta->>'page')::int, (bc.chunk_meta->>'chunk_index')::int
+                    ORDER BY bc.doc_id, bc.page, bc.chunk_indx
                     LIMIT %s
                     """)
         values.append(top_k)
@@ -357,13 +359,13 @@ class PGTools:
             return orjson.dumps(res).decode("utf-8")
 
     async def get_browser_task(self, browser_task_id: int) -> str:
-        """Retrieve the starting_task for a given task_id from the browser_tasks table.
+        """Retrieve the starting_task for a given task_id from ai_proj_browser.tasks.
         This is the same info from semantic_task_search."""
 
         sql = """
             SELECT starting_task
-            FROM ai_proj.browser_tasks
-            WHERE id = %s
+            FROM ai_proj_browser.tasks
+            WHERE task_id = %s
         """
         async with self._get_cur() as cur:
             await cur.execute(sql, [browser_task_id])
@@ -376,7 +378,7 @@ class PGTools:
         top_k: int = 5,
         min_score: float = 0,
     ) -> str:
-        """Search for relevant tasks in the browser_tasks table using vector similarity. Your query should
+        """Search for relevant tasks in ai_proj_browser.tasks using vector similarity. Your query should
         be a natural language description of the task as if you were instructing the browser subagent to get new information.
         """
         if not query.strip():
@@ -398,10 +400,10 @@ class PGTools:
                 SELECT %s::vector AS embedding
                 )
             SELECT
-                bt.id as task_id,
+                bt.task_id,
                 bt.starting_task,
                 (1 - (bt.embedding <=> emb.embedding))::double precision AS score
-            FROM ai_proj.browser_tasks bt
+            FROM ai_proj_browser.tasks bt
             CROSS JOIN emb
             ORDER BY bt.embedding <=> emb.embedding
             LIMIT %s
@@ -470,6 +472,39 @@ class PGTools:
         self.triggered_browser_use = (objective, Vector(query_embedding))
         return "Browser task triggered."
 
+    async def queue_browser(
+        self,
+        research_task_id: int | None,
+        state: dict[str, Any],
+        browser_task: str,
+        vector: Vector,
+        *,
+        deployment_id: int,
+    ):
+        browser_queue = Queue(
+            conn_str=self.settings.queue_conn_str,
+            queue="allworker",
+        )
+
+        async with self._get_cur() as cur:
+            await cur.execute(
+                """
+    INSERT INTO ai_proj_browser.tasks (starting_task, embedding, deployment_id, research_task_id)
+    VALUES (%s, %s, %s, %s)
+    RETURNING task_id
+""",
+                (browser_task, vector, deployment_id, research_task_id),
+            )
+            row = await cur.fetchone()
+            assert row is not None, "Failed to create browser task"
+            browser_task_id = row["task_id"]
+            message = {
+                "function": "browser",
+                "payload": browser_task_id,
+            }
+
+            await browser_queue.send_message(message)
+
 
 def _run_ddgs_text_search(query: str, max_results: int) -> list[dict[str, Any]]:
     with DDGS() as client:
@@ -479,3 +514,10 @@ def _run_ddgs_text_search(query: str, max_results: int) -> list[dict[str, Any]]:
             max_results=max_results,
             backend=["brave", "duckduckgo", "google", "yahoo"],
         )
+
+
+model_res = TypeAdapter(dict[str, Any])
+
+
+def to_json_str(ins: dict[str, Any]) -> str:
+    return model_res.dump_json(ins).decode("utf-8")
