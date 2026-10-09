@@ -10,7 +10,27 @@ from dean_research_tools.embeddings import EmbeddingsModel
 
 
 def is_local():
-    return Path(".env").exists()
+    env_path = Path(".env")
+    if not env_path.exists():
+        return False
+
+    required = {
+        "RESEARCH_AZURE_API_KEY",
+        "RESEARCH_AZURE_ENDPOINT",
+        "RESEARCH_DB_HOST",
+        "RESEARCH_DB_NAME",
+        "RESEARCH_DB_PASSWORD",
+        "RESEARCH_DB_USER",
+        "RESEARCH_EMBEDDING_ENDPOINT",
+        "RESEARCH_EMBEDDING_MODEL",
+        "RESEARCH_QUEUE_CONN_STR",
+    }
+    configured = set()
+    for line in env_path.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if separator and value.strip():
+            configured.add(key.strip())
+    return required <= configured
 
 
 def read_env_file(to_env: bool = False):
@@ -38,7 +58,7 @@ def read_env_file(to_env: bool = False):
 @pytest.mark.asyncio
 async def test_embed(with_env: bool):
     if not is_local():
-        return
+        pytest.skip(".env does not contain all required RESEARCH_* settings")
     if with_env:
         read_env_file(to_env=True)
         settings = None
@@ -52,7 +72,7 @@ async def test_embed(with_env: bool):
 @pytest.mark.asyncio
 async def test_semantic_search(with_env: bool):
     if not is_local():
-        return
+        pytest.skip(".env does not contain all required RESEARCH_* settings")
     if with_env:
         read_env_file(to_env=True)
         settings = None
@@ -66,7 +86,7 @@ async def test_semantic_search(with_env: bool):
 @pytest.mark.asyncio
 async def test_pool():
     if not is_local():
-        return
+        pytest.skip(".env does not contain all required RESEARCH_* settings")
     from psycopg_pool import AsyncConnectionPool
 
     settings = read_env_file()
@@ -88,7 +108,7 @@ async def test_pool():
 @pytest.mark.asyncio
 async def test_semantic_research_search(with_env: bool):
     if not is_local():
-        return
+        pytest.skip(".env does not contain all required RESEARCH_* settings")
     if with_env:
         read_env_file(to_env=True)
         settings = None

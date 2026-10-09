@@ -47,6 +47,7 @@ AVAILABLE_TOOLS = Literal[
     "semantic_research_search",
     "get_research_result",
     "web_search",
+    "queue_browser",
 ]
 
 
@@ -475,12 +476,13 @@ class PGTools:
     async def queue_browser(
         self,
         research_task_id: int | None,
-        state: dict[str, Any],
+        state: dict,
         browser_task: str,
-        vector: Vector,
+        vector: list[float],
         *,
         deployment_id: int,
     ):
+        """Queue browser work and store its task metadata."""
         browser_queue = Queue(
             conn_str=self.settings.queue_conn_str,
             queue="allworker",
@@ -493,7 +495,12 @@ class PGTools:
     VALUES (%s, %s, %s, %s)
     RETURNING task_id
 """,
-                (browser_task, vector, deployment_id, research_task_id),
+                (
+                    browser_task,
+                    vector if isinstance(vector, Vector) else Vector(vector),
+                    deployment_id,
+                    research_task_id,
+                ),
             )
             row = await cur.fetchone()
             assert row is not None, "Failed to create browser task"

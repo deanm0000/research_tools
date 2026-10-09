@@ -119,3 +119,11 @@ class BrowserUseInput(BaseModel):
         it needs to ingest. The agent will then use the browser to collect content and ingest it into the database. The agent will return a task_id which can be used
         to retrieve the content with your existing tools."""
     )
+
+
+class QueueBrowserInput(BaseModel):
+    research_task_id: int | None
+    state: dict
+    browser_task: str
+    vector: list[float]
+    deployment_id: int
