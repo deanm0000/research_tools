@@ -1,4 +1,4 @@
-from inspect import isfunction, signature
+from inspect import signature
 from typing import Any, get_args
 
 from langchain_core.tools import ArgsSchema
@@ -42,7 +42,7 @@ def _parse_model_arg(model_args: dict[str, Any], arg: str) -> set[str]:
 def _parse_arg_info(arg_info: dict[str, Any]) -> set[str]:
     inner_types = ""
     if "items" in arg_info:
-        inner_types_raw = sorted(list(_parse_arg_info(arg_info["items"])))
+        inner_types_raw = sorted(_parse_arg_info(arg_info["items"]))
         inner_types = "[" + ",".join(inner_types_raw) + "]"
     if "type" in arg_info:
         arg_type = TYPE_MAP[arg_info["type"]]
@@ -86,11 +86,9 @@ blank = Settings.dummies()
 
 def test_get_all_tools():
     """Tests that the functions returned by _get_all_tools match the functions defined in the PGTools class."""
-    funcs_in_all = set(x.name for x in PGTools(settings=blank)._get_all_tools())
+    funcs_in_all = {x.name for x in PGTools(settings=blank)._get_all_tools()}
 
-    funcs_in_class = set(
-        x for x in dir(PGTools) if x[0] != "_" and isfunction(getattr(PGTools, x))
-    )
+    funcs_in_class = set(get_args(AVAILABLE_TOOLS))
 
     if funcs_in_class != funcs_in_all:
         missing_from_class = funcs_in_all - funcs_in_class
@@ -101,19 +99,11 @@ def test_get_all_tools():
 
 
 def test_available_tools():
-    """Tests that the functions defined in the PGTools class match the functions listed in AVAILABLE_TOOLS."""
-    funcs_in_class = set(
-        x for x in dir(PGTools) if x[0] != "_" and isfunction(getattr(PGTools, x))
-    )
-
-    funcs_in_literal = set(get_args(AVAILABLE_TOOLS))
-
-    if funcs_in_class != funcs_in_literal:
-        missing_from_class = funcs_in_literal - funcs_in_class
-        missing_from_literal = funcs_in_class - funcs_in_literal
-        raise ValueError(
-            f"Mismatch between PGTools class and AVAILABLE_TOOLS literal. Missing from class: {missing_from_class}. Missing from literal: {missing_from_literal}"
-        )
+    """Only explicitly registered methods are exposed to LLMs."""
+    for name in get_args(AVAILABLE_TOOLS):
+        assert callable(getattr(PGTools, name))
+    assert "queue_browser" not in get_args(AVAILABLE_TOOLS)
+    assert callable(PGTools.queue_browser)
 
 
 def test_arg_schema_sync():

@@ -18,7 +18,7 @@ class EmbeddingsModel:
         embedding_model: str | None = None,
         api_key: str | None = None,
         embedding_endpoint: str | None = None,
-    ):
+    ) -> None:
         if settings is None and (
             embedding_model is None or api_key is None or embedding_endpoint is None
         ):
@@ -54,8 +54,9 @@ class EmbeddingsModel:
         self,
         texts: list[str],
         input_type: Literal["search_document", "search_query"] = "search_query",
-    ) -> list[list[float]] | None:
-        results = []
+    ) -> list[list[float]]:
+        """Embed batches with an explicit query/document purpose."""
+        results: list[list[float]] = []
         chunked = self.chunk_list(texts)
         for chunk in chunked:
             result = await self.co_client.embed(
@@ -66,22 +67,20 @@ class EmbeddingsModel:
             )
             flt = result.embeddings.float_
             if flt is None:
-                return None
+                raise ValueError("Embedding result is None")
+            if len(flt) != len(chunk):
+                raise ValueError("Embedding count does not match input count")
             results.extend(flt)
         return results
 
-    async def embed_search(self, text: str):
-        result = await self.co_client.embed(
-            model=self.embedding_model,
-            texts=[text],
-            input_type="search_query",
-            embedding_types=["float"],
-        )
-        flt = result.embeddings.float_
-        if flt is None:
-            raise ValueError("Embedding result is None")
-        return flt[0]
+    async def embed_search(self, text: str) -> list[float]:
+        return (await self.embed_texts([text], input_type="search_query"))[0]
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return await self.embed_texts(texts, input_type="search_document")
 
     @staticmethod
-    def chunk_list(lst, size=96):
+    def chunk_list(lst: list[str], size: int = 96) -> list[list[str]]:
+        if size < 1:
+            raise ValueError("size must be >= 1")
         return [lst[i : i + size] for i in range(0, len(lst), size)]

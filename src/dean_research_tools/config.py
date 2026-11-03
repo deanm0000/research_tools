@@ -23,6 +23,7 @@ class Settings(BaseModel):
     embedding_endpoint: str
     embedding_model: str
     queue_conn_str: str
+    queue_name: str = "allworker"
 
     @property
     def db_dsn(self) -> SecretStr:
@@ -63,7 +64,7 @@ class Settings(BaseModel):
         elif isinstance(settings, dict):
             return Settings.model_validate(settings)
         else:
-            raise ValueError(f"Cannot coerce {settings} to Settings")
+            raise TypeError(f"Cannot coerce {settings} to Settings")
 
 
 SettingsLike: TypeAlias = Settings | BaseModel | dict[str, Any]
@@ -93,6 +94,7 @@ def load_settings(
     embedding_endpoint: str | None = None,
     embedding_model: str | None = None,
     queue_conn_str: str | None = None,
+    queue_name: str | None = None,
     **kwargs,  ## this allows destructuring of a bigger Settings object to pass in
 ) -> Settings:
     """Load settings from keyword overrides or RESEARCH_* environment variables."""
@@ -107,6 +109,7 @@ def load_settings(
         or embedding_endpoint is not None
         or embedding_model is not None
         or queue_conn_str is not None
+        or queue_name is not None
     ):
         raise ValueError("Cannot specify both settings and individual overrides")
     if settings is not None:
@@ -150,4 +153,9 @@ def load_settings(
         embedding_endpoint=resolved_embedding_endpoint,
         embedding_model=resolved_embedding_deployment,
         queue_conn_str=queue_conn_str or _require_env(_research_env("queue_conn_str")),
+        queue_name=(
+            queue_name
+            if queue_name is not None
+            else os.getenv(_research_env("queue_name"), "allworker")
+        ),
     )

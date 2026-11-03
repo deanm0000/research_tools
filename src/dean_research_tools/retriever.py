@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
-from inspect import ismethod
-from typing import TYPE_CHECKING, Any, Literal, Sequence, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 from weakref import WeakSet
 
 import orjson
@@ -14,13 +14,14 @@ from langchain_core.tools import StructuredTool
 from pgvector import Vector
 from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
-from pydantic import TypeAdapter
 
-import dean_research_tools.models as models
+from dean_research_tools import models
 from dean_research_tools.config import SettingsLike, load_settings
 from dean_research_tools.embeddings import EmbeddingsModel
+from dean_research_tools.lifecycle import Lifecycle, State
 
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
@@ -47,7 +48,6 @@ AVAILABLE_TOOLS = Literal[
     "semantic_research_search",
     "get_research_result",
     "web_search",
-    "queue_browser",
 ]
 
 
@@ -110,9 +110,7 @@ class PGTools:
 
     def _get_all_tools(self) -> list[StructuredTool]:
         tools = []
-        for tool_name in dir(self):
-            if tool_name[0] == "_" or not ismethod(getattr(self, tool_name)):
-                continue
+        for tool_name in get_args(AVAILABLE_TOOLS):
             kwargs = {
                 "coroutine": getattr(self, tool_name),
                 "args_schema": getattr(models, _to_pascal_inputs(tool_name)),
@@ -128,11 +126,11 @@ class PGTools:
     def _get_tools(
         self,
     ) -> list[StructuredTool]:
-        tools_to_get: tuple[AVAILABLE_TOOLS] = tuple([])
+        tools_to_get: tuple[AVAILABLE_TOOLS, ...] = ()
         if self.include is not None and self.exclude is not None:
             raise ValueError("Cannot specify both include and exclude")
         elif self.include is None and self.exclude is None:
-            tools_to_get: tuple[AVAILABLE_TOOLS] = get_args(AVAILABLE_TOOLS)
+            tools_to_get = get_args(AVAILABLE_TOOLS)
         elif self.include is not None:
             tools_to_get = tuple(
                 x for x in get_args(AVAILABLE_TOOLS) if x in self.include
@@ -256,17 +254,25 @@ class PGTools:
             INNER JOIN ai_proj_browser.tasks bt using (task_id)
             CROSS JOIN emb
             """)
-        values: list[Vector | int | str] = [Vector(query_embedding)]
+        values: list[Vector | int | str | float] = [Vector(query_embedding), min_score]
         wheres = [
             SQL("""
             WHERE bc.embedding IS NOT NULL
               AND bc.text_chunk IS NOT NULL
+              AND (1 - (bc.embedding <=> emb.embedding))::double precision >= %s
             """)
         ]
 
         if browser_task_id is not None:
-            wheres.append(SQL("AND bt.task_id = %s "))
-            values.append(browser_task_id)
+            wheres.append(SQL("""
+                AND (bt.task_id = %s OR EXISTS (
+                    SELECT 1 FROM ai_proj_browser.links scope_link
+                    WHERE scope_link.task_id = %s
+                      AND scope_link.doc_id = bc.doc_id
+                      AND scope_link.status = 'done'
+                ))
+            """))
+            values.extend([browser_task_id, browser_task_id])
 
         if doc_id is not None:
             wheres.append(SQL("AND bc.doc_id = %s "))
@@ -335,8 +341,15 @@ class PGTools:
         values: list[str | int | list[str] | list[int]] = [keywords]
 
         if task_id is not None:
-            wheres.append(SQL("AND bt.task_id = %s"))
-            values.append(task_id)
+            wheres.append(SQL("""
+                AND (bt.task_id = %s OR EXISTS (
+                    SELECT 1 FROM ai_proj_browser.links scope_link
+                    WHERE scope_link.task_id = %s
+                      AND scope_link.doc_id = bc.doc_id
+                      AND scope_link.status = 'done'
+                ))
+            """))
+            values.extend([task_id, task_id])
         if doc_id is not None:
             wheres.append(SQL("AND bc.doc_id = %s"))
             values.append(doc_id)
@@ -389,12 +402,7 @@ class PGTools:
         if not (0.0 <= min_score <= 1.0):
             return "min_score must be between 0.0 and 1.0"
 
-        query_embedding = await self.embeddings.embed_texts(
-            [query], input_type="search_query"
-        )
-        if query_embedding is None:
-            return "Failed to generate query embedding"
-        query_embedding = query_embedding[0]
+        query_embedding = await self.embeddings.embed_search(query)
 
         sql = SQL("""
             WITH emb AS (
@@ -406,10 +414,11 @@ class PGTools:
                 (1 - (bt.embedding <=> emb.embedding))::double precision AS score
             FROM ai_proj_browser.tasks bt
             CROSS JOIN emb
+            WHERE (1 - (bt.embedding <=> emb.embedding))::double precision >= %s
             ORDER BY bt.embedding <=> emb.embedding
             LIMIT %s
             """)
-        values = [Vector(query_embedding), top_k]
+        values = [Vector(query_embedding), min_score, top_k]
         async with self._get_cur() as cur:
             await cur.execute(sql, values)
             res = await cur.fetchall()
@@ -464,53 +473,44 @@ class PGTools:
         After ingestion, query the vector database using the returned browser_task_id to
         retrieve and reason over the content yourself.RETURN_DIRECT"""
 
-        query_embedding = await self.embeddings.embed_texts(
-            [objective], input_type="search_query"
-        )
-        if query_embedding is None:
-            return "Failed to generate query embedding"
-        query_embedding = query_embedding[0]
+        query_embedding = (
+            await self.embeddings.embed_documents([objective])
+        )[0]
         self.triggered_browser_use = (objective, Vector(query_embedding))
         return "Browser task triggered."
 
     async def queue_browser(
         self,
         research_task_id: int | None,
-        state: dict,
-        browser_task: str,
-        vector: list[float],
-        *,
-        deployment_id: int,
-    ):
-        """Queue browser work and store its task metadata."""
+        state: State,
+        objective: str,
+        vector: list[float] | Vector,
+    ) -> int:
+        """Trusted programmatic API; persist a task and enqueue its ID (not an LLM tool).
+
+        For research handoffs, the database function atomically persists the paused
+        state. An existing transaction is rejected so work cannot be dispatched
+        before its database record commits; use Lifecycle for transactional creation.
+        """
         browser_queue = Queue(
             conn_str=self.settings.queue_conn_str,
-            queue="allworker",
+            queue=self.settings.queue_name,
         )
-
-        async with self._get_cur() as cur:
-            await cur.execute(
-                """
-    INSERT INTO ai_proj_browser.tasks (starting_task, embedding, deployment_id, research_task_id)
-    VALUES (%s, %s, %s, %s)
-    RETURNING task_id
-""",
-                (
-                    browser_task,
-                    vector if isinstance(vector, Vector) else Vector(vector),
-                    deployment_id,
-                    research_task_id,
-                ),
-            )
-            row = await cur.fetchone()
-            assert row is not None, "Failed to create browser task"
-            browser_task_id = row["task_id"]
-            message = {
-                "function": "browser",
-                "payload": browser_task_id,
-            }
-
-            await browser_queue.send_message(message)
+        async with self._get_conn() as conn:
+            if conn.info.transaction_status != TransactionStatus.IDLE:
+                raise RuntimeError(
+                    "queue_browser requires an idle connection; use Lifecycle "
+                    "inside caller-managed transactions"
+                )
+            async with conn.transaction():
+                await ensure_pgvector_registered(conn)
+                browser_task_id = await Lifecycle(conn).create_browser(
+                    research_task_id, state, objective, vector
+                )
+        await browser_queue.send_message(
+            {"function": "browser", "payload": browser_task_id}
+        )
+        return browser_task_id
 
 
 def _run_ddgs_text_search(query: str, max_results: int) -> list[dict[str, Any]]:
@@ -521,10 +521,3 @@ def _run_ddgs_text_search(query: str, max_results: int) -> list[dict[str, Any]]:
             max_results=max_results,
             backend=["brave", "duckduckgo", "google", "yahoo"],
         )
-
-
-model_res = TypeAdapter(dict[str, Any])
-
-
-def to_json_str(ins: dict[str, Any]) -> str:
-    return model_res.dump_json(ins).decode("utf-8")

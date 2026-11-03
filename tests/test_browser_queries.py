@@ -1,10 +1,12 @@
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
 import pytest
 from pgvector import Vector
+from psycopg.pq import TransactionStatus
 
 from dean_research_tools.retriever import PGTools
 
@@ -15,8 +17,9 @@ def browser_tools():
     tools.embeddings = SimpleNamespace(
         embed_search=AsyncMock(return_value=[0.1, 0.2]),
         embed_texts=AsyncMock(return_value=[[0.1, 0.2]]),
+        embed_documents=AsyncMock(return_value=[[0.1, 0.2]]),
     )
-    tools.settings = SimpleNamespace(queue_conn_str="dummy")
+    tools.settings = SimpleNamespace(queue_conn_str="dummy", queue_name="custom-worker")
     cursor = AsyncMock()
     cursor.fetchall.return_value = []
 
@@ -25,6 +28,16 @@ def browser_tools():
         yield cursor
 
     tools._get_cur = get_cur
+
+    @asynccontextmanager
+    async def get_conn() -> AsyncIterator[SimpleNamespace]:
+        conn = SimpleNamespace(
+            info=SimpleNamespace(transaction_status=TransactionStatus.IDLE),
+            transaction=MagicMock(return_value=AsyncMock()),
+        )
+        yield conn
+
+    tools._get_conn = get_conn
     return tools, cursor
 
 
@@ -38,7 +51,9 @@ async def test_semantic_content_query(browser_tools, filtered):
     cursor.fetchall.return_value = [
         {"task_id": 7, "doc_id": 9, "page": 2, "chunk_index": 3, "text_chunk": "text"}
     ]
-    result = await tools.semantic_content_search("query", top_k=3, **filters)
+    result = await tools.semantic_content_search(
+        "query", top_k=3, min_score=0.7, **filters
+    )
     query, values = cursor.execute.call_args.args
     sql = query.as_string()
 
@@ -48,9 +63,10 @@ async def test_semantic_content_query(browser_tools, filtered):
     assert "bc.page" in sql
     assert "bc.chunk_indx AS chunk_index" in sql
     assert "ORDER BY bc.embedding <=> emb.embedding" in sql
-    assert values[1:] == ([7, 9, "example", 3] if filtered else [3])
+    assert "(1 - (bc.embedding <=> emb.embedding))::double precision >= %s" in sql
+    assert values[1:] == ([0.7, 7, 7, 9, "example", 3] if filtered else [0.7, 3])
     if filtered:
-        assert "AND bt.task_id = %s" in sql
+        assert "AND (bt.task_id = %s OR EXISTS" in sql
         assert "AND bc.doc_id = %s" in sql
         assert "AND bd.url ILIKE '%%' || %s || '%%'" in sql
     assert orjson.loads(result) == cursor.fetchall.return_value
@@ -69,10 +85,10 @@ async def test_keyword_content_query(browser_tools, filtered):
     assert "INNER JOIN ai_proj_browser.docs bd using (doc_id)" in sql
     assert "INNER JOIN ai_proj_browser.tasks bt using (task_id)" in sql
     assert "bc.chunk_indx AS chunk_index" in sql
-    assert "AND bt.task_id = %s" in sql
+    assert "AND (bt.task_id = %s OR EXISTS" in sql
     assert "ORDER BY bc.doc_id, bc.page, bc.chunk_indx" in sql
     assert values == (
-        [["query"], 7, 9, [2], "example", 3] if filtered else [["query"], 7, 3]
+        [["query"], 7, 7, 9, [2], "example", 3] if filtered else [["query"], 7, 7, 3]
     )
     if filtered:
         assert "AND bc.doc_id = %s" in sql
@@ -94,16 +110,43 @@ async def test_get_browser_task_query(browser_tools):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("semantic", [False, True])
+async def test_task_scope_includes_reused_documents_without_join_duplicates(
+    browser_tools: tuple[PGTools, AsyncMock], semantic: bool
+) -> None:
+    tools, cursor = browser_tools
+    reused_chunk = {"task_id": 1, "doc_id": 9, "text_chunk": "reused"}
+    cursor.fetchall.return_value = [reused_chunk]
+    if semantic:
+        result = await tools.semantic_content_search("query", browser_task_id=7)
+    else:
+        result = await tools.keyword_content_search(["query"], task_id=7)
+    query, values = cursor.execute.call_args.args
+    sql = query.as_string()
+    assert "bt.task_id = %s OR EXISTS" in sql
+    assert "SELECT 1 FROM ai_proj_browser.links scope_link" in sql
+    assert "scope_link.task_id = %s" in sql
+    assert "scope_link.doc_id = bc.doc_id" in sql
+    assert "scope_link.status = 'done'" in sql
+    assert "JOIN ai_proj_browser.links" not in sql
+    assert values.count(7) == 2
+    assert orjson.loads(result) == [reused_chunk]
+
+
+@pytest.mark.asyncio
 async def test_semantic_browser_task_query(browser_tools):
     tools, cursor = browser_tools
-    await tools.semantic_browser_task_search("query", top_k=3)
+    await tools.semantic_browser_task_search("query", top_k=3, min_score=0.6)
     query, values = cursor.execute.call_args.args
     sql = query.as_string()
 
     assert "FROM ai_proj_browser.tasks bt" in sql
     assert "bt.task_id" in sql
     assert "ORDER BY bt.embedding <=> emb.embedding" in sql
-    assert values[1:] == [3]
+    assert "(1 - (bt.embedding <=> emb.embedding))::double precision >= %s" in sql
+    assert values[1:] == [0.6, 3]
+    tools.embeddings.embed_search.assert_awaited_once_with("query")
+    tools.embeddings.embed_documents.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -112,18 +155,112 @@ async def test_queue_browser_query(browser_tools, research_task_id):
     tools, cursor = browser_tools
     cursor.fetchone.return_value = {"task_id": 42}
     vector = Vector([0.1, 0.2])
-    with patch("dean_research_tools.retriever.Queue") as queue:
+    with (
+        patch("dean_research_tools.retriever.Queue") as queue,
+        patch("dean_research_tools.retriever.Lifecycle") as lifecycle,
+        patch(
+            "dean_research_tools.retriever.ensure_pgvector_registered",
+            new_callable=AsyncMock,
+        ),
+    ):
         queue.return_value.send_message = AsyncMock()
-        await tools.queue_browser(
-            research_task_id, {}, "objective", vector, deployment_id=11
+        lifecycle.return_value.create_browser = AsyncMock(return_value=42)
+        assert await tools.queue_browser(
+            research_task_id, {}, "objective", vector
+        ) == 42
+        lifecycle.return_value.create_browser.assert_awaited_once_with(
+            research_task_id, {}, "objective", vector
         )
-        sql, values = cursor.execute.call_args.args
-
-        assert "INSERT INTO ai_proj_browser.tasks" in sql
-        assert "(starting_task, embedding, deployment_id, research_task_id)" in sql
-        assert "VALUES (%s, %s, %s, %s)" in sql
-        assert "RETURNING task_id" in sql
-        assert values == ("objective", vector, 11, research_task_id)
+        queue.assert_called_once_with(conn_str="dummy", queue="custom-worker")
         queue.return_value.send_message.assert_awaited_once_with(
             {"function": "browser", "payload": 42}
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["semantic_content_search", "semantic_browser_task_search"])
+@pytest.mark.parametrize("min_score", [-0.1, 1.1])
+async def test_invalid_threshold_never_queries(
+    browser_tools: tuple[PGTools, AsyncMock], method: str, min_score: float
+) -> None:
+    tools, cursor = browser_tools
+    result = await getattr(tools, method)("query", min_score=min_score)
+    assert result == "min_score must be between 0.0 and 1.0"
+    cursor.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queue_rejects_uncommitted_caller_transaction(
+    browser_tools: tuple[PGTools, AsyncMock],
+) -> None:
+    tools, cursor = browser_tools
+
+    @asynccontextmanager
+    async def get_conn() -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(
+            info=SimpleNamespace(transaction_status=TransactionStatus.INTRANS)
+        )
+
+    tools._get_conn = get_conn
+    with patch("dean_research_tools.retriever.Queue") as queue:
+        queue.return_value.send_message = AsyncMock()
+        with pytest.raises(RuntimeError, match="idle connection"):
+            await tools.queue_browser(None, {}, "objective", [0.1])
+        queue.return_value.send_message.assert_not_awaited()
+    cursor.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_browser_use_only_records_handoff(
+    browser_tools: tuple[PGTools, AsyncMock],
+) -> None:
+    tools, cursor = browser_tools
+    result = await tools.browser_use("objective")
+    assert result == "Browser task triggered."
+    assert tools.triggered_browser_use is not None
+    assert tools.triggered_browser_use[0] == "objective"
+    assert isinstance(tools.triggered_browser_use[1], Vector)
+    tools.embeddings.embed_documents.assert_awaited_once_with(["objective"])
+    tools.embeddings.embed_search.assert_not_awaited()
+    cursor.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queue_commits_before_dispatch(browser_tools: tuple[PGTools, AsyncMock]) -> None:
+    tools, _ = browser_tools
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def transaction() -> AsyncIterator[None]:
+        yield
+        events.append("commit")
+
+    @asynccontextmanager
+    async def get_conn() -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(
+            info=SimpleNamespace(transaction_status=TransactionStatus.IDLE),
+            transaction=transaction,
+        )
+
+    async def create_browser(
+        research_task_id: int | None,
+        state: dict[str, str],
+        objective: str,
+        vector: list[float],
+    ) -> int:
+        events.append("create")
+        return 42
+
+    async def send_message(message: dict[str, str | int]) -> None:
+        events.append("publish")
+
+    tools._get_conn = get_conn
+    with (
+        patch("dean_research_tools.retriever.Queue") as queue,
+        patch("dean_research_tools.retriever.Lifecycle") as lifecycle,
+        patch("dean_research_tools.retriever.ensure_pgvector_registered", new_callable=AsyncMock),
+    ):
+        lifecycle.return_value.create_browser = create_browser
+        queue.return_value.send_message = send_message
+        assert await tools.queue_browser(None, {}, "objective", [0.1]) == 42
+    assert events == ["create", "commit", "publish"]
