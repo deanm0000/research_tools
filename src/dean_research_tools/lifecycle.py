@@ -55,6 +55,18 @@ class BrowserDispatch(BaseModel):
     finished: bool
 
 
+class BrowserRequest(BaseModel):
+    objective: str
+    embedding: list[float]
+    ordinal: int
+    tool_call_id: str | None = None
+
+
+class BrowserContinuation(BaseModel):
+    batch_id: int
+    research_id: int
+
+
 class BrowserProgress(BaseModel):
     task_id: int
     status: str | None = None
@@ -101,23 +113,84 @@ class Lifecycle:
     def __init__(self, conn: AsyncConnection) -> None:
         self.conn = conn
 
-    async def get_pending_browser(self, research_id: int) -> BrowserDispatch | None:
-        """Recover an existing browser handoff after queue publication fails."""
+    async def get_pending_browsers(self, research_id: int) -> list[BrowserDispatch]:
         async with self.conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                """
-                SELECT bt.task_id, bt.status::text AS status,
-                    (td.task_id IS NOT NULL) AS finished
-                FROM ai_proj.researcher_tasks rt
-                JOIN ai_proj.research_task_pause p ON p.research_id = rt.id
-                JOIN ai_proj_browser.tasks bt ON bt.task_id = p.browser_task_id
-                LEFT JOIN ai_proj_browser.tasks_done td ON td.task_id = bt.task_id
-                WHERE rt.id = %s AND rt.status = 'paused_for_browser'
-                """,
+                """SELECT t.task_id, t.status::text AS status,
+                    (d.task_id IS NOT NULL) AS finished
+                FROM ai_proj.research_task_pause p
+                JOIN ai_proj.research_browser_members m USING (batch_id)
+                JOIN ai_proj_browser.tasks t ON t.task_id=m.task_id
+                LEFT JOIN ai_proj_browser.tasks_done d ON d.task_id=t.task_id
+                WHERE p.research_id=%s ORDER BY m.ordinal""",
                 (research_id,),
             )
+            rows = await cur.fetchall()
+        return [BrowserDispatch.model_validate(row) for row in rows]
+
+    async def create_browser_batch(
+        self, research_id: int, state: State, requests: list[BrowserRequest],
+    ) -> list[int]:
+        if len(requests) == 0:
+            raise ValueError("A browser batch must contain at least one request")
+        async with self.conn.cursor() as cur:
+            await cur.execute(
+                """SELECT task_id FROM ai_proj.research_make_browser_batch(
+                    %s::bigint,%s::jsonb,%s::jsonb)""",
+                (research_id, to_json_str(state),
+                 TypeAdapter(list[BrowserRequest]).dump_json(requests).decode()),
+            )
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
+    async def get_browser_continuation(
+        self, browser_id: int,
+    ) -> BrowserContinuation | None:
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """SELECT batch_id, research_id FROM ai_proj.research_browser_batches
+                WHERE publisher_task_id=%s AND published_at IS NULL
+                  AND resumed_at IS NULL""",
+                (browser_id,),
+            )
             row = await cur.fetchone()
-        return None if row is None else BrowserDispatch.model_validate(row)
+        return None if row is None else BrowserContinuation.model_validate(row)
+
+    async def acknowledge_browser_continuation(self, batch_id: int) -> None:
+        async with self.conn.cursor() as cur:
+            await cur.execute(
+                """UPDATE ai_proj.research_browser_batches SET published_at=now()
+                WHERE batch_id=%s AND published_at IS NULL
+                  AND publisher_task_id IS NOT NULL""",
+                (batch_id,),
+            )
+
+    async def accepts_continuation(self, research_id: int, batch_id: int) -> bool:
+        async with self.conn.cursor() as cur:
+            await cur.execute(
+                """SELECT EXISTS (
+                    SELECT 1 FROM ai_proj.research_browser_batches b
+                    JOIN ai_proj.researcher_tasks r ON r.id=b.research_id
+                    WHERE b.batch_id=%s AND b.research_id=%s
+                      AND b.publisher_task_id IS NOT NULL
+                      AND r.status IN ('paused_for_browser','error','in_progress')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM ai_proj.research_browser_batches newer
+                        WHERE newer.research_id=b.research_id
+                          AND newer.batch_id>b.batch_id))""",
+                (batch_id, research_id),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise RuntimeError(f"Could not inspect continuation {batch_id}")
+        return row[0]
+
+    async def get_pending_browser(self, research_id: int) -> BrowserDispatch | None:
+        """Singleton compatibility: prefer unfinished work when a batch is pending."""
+        tasks = await self.get_pending_browsers(research_id)
+        if len(tasks) == 0:
+            return None
+        return next((task for task in tasks if not task.finished), tasks[0])
 
     async def mark_research_error(self, research_id: int) -> None:
         """Make interrupted execution retryable without changing paused/completed work."""
@@ -233,12 +306,21 @@ class Lifecycle:
             raise RuntimeError("Browser task not created; check current browser settings")
         return int(row["task_id"])
 
-    async def start_research(self, research_task_id: int) -> ResearchStart:
+    async def start_research(
+        self, research_task_id: int, *, recover_in_progress: bool = False,
+    ) -> ResearchStart:
+        """Recover an in-progress checkpoint only while holding an exclusive worker claim."""
         async with self.conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT * FROM ai_proj.start_research_task(%s::integer)",
-                (research_task_id,),
-            )
+            if recover_in_progress:
+                await cur.execute(
+                    "SELECT * FROM ai_proj.start_research_task(%s::integer,%s::boolean)",
+                    (research_task_id, True),
+                )
+            else:
+                await cur.execute(
+                    "SELECT * FROM ai_proj.start_research_task(%s::integer)",
+                    (research_task_id,),
+                )
             row = await cur.fetchone()
         if row is None:
             raise LookupError(f"Research task {research_task_id} cannot be started")
@@ -310,13 +392,11 @@ class Lifecycle:
                      JOIN ai_proj_browser.docs d USING (doc_id)
                      WHERE d.task_id = t.task_id) AS image_chunks,
                     ARRAY(
-                        SELECT p.research_id FROM ai_proj.research_task_pause p
-                        JOIN ai_proj.researcher_tasks rt ON rt.id = p.research_id
-                        WHERE p.browser_task_id = t.task_id
-                          AND rt.status = 'paused_for_browser'
-                          AND td.task_id IS NOT NULL
-                          AND counts.pending_links = 0
-                        ORDER BY p.research_id
+                        SELECT b.research_id FROM ai_proj.research_browser_batches b
+                        JOIN ai_proj.research_task_pause p USING (batch_id)
+                        WHERE b.publisher_task_id=t.task_id
+                          AND b.published_at IS NULL AND b.resumed_at IS NULL
+                        ORDER BY b.research_id
                     ) AS pending_research_ids
                 FROM ai_proj_browser.tasks t
                 LEFT JOIN ai_proj_browser.tasks_done td USING (task_id)

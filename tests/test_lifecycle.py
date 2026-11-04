@@ -163,8 +163,8 @@ async def test_browser_progress(lifecycle: tuple[Lifecycle, AsyncMock]) -> None:
     assert "WHERE l.status = 'queued'" in sql
     assert "ai_proj_browser.tasks_done" in sql
     assert "ai_proj.research_task_pause" in sql
-    assert "td.task_id IS NOT NULL" in sql
-    assert "counts.pending_links = 0" in sql
+    assert "b.publisher_task_id=t.task_id" in sql
+    assert "b.published_at IS NULL AND b.resumed_at IS NULL" in sql
     assert values == (8,)
 
 
@@ -265,26 +265,24 @@ async def test_pending_browser_dispatch(
     lifecycle: tuple[Lifecycle, AsyncMock], finished: bool
 ) -> None:
     service, cur = lifecycle
-    cur.fetchone.return_value = {
+    cur.fetchall.return_value = [{
         "task_id": 8, "status": "complete" if finished else "queued", "finished": finished
-    }
+    }]
     result = await service.get_pending_browser(13)
     assert isinstance(result, BrowserDispatch)
     assert result.task_id == 8
     assert result.finished == finished
     sql, values = cur.execute.call_args.args
-    assert "rt.status = 'paused_for_browser'" in sql
-    assert "JOIN ai_proj.research_task_pause" in sql
-    assert "JOIN ai_proj_browser.tasks bt" in sql
+    assert "research_browser_members" in sql
     assert "LEFT JOIN ai_proj_browser.tasks_done" in sql
-    assert "(td.task_id IS NOT NULL) AS finished" in sql
+    assert "(d.task_id IS NOT NULL) AS finished" in sql
     assert values == (13,)
 
 
 @pytest.mark.asyncio
 async def test_no_pending_browser(lifecycle: tuple[Lifecycle, AsyncMock]) -> None:
     service, cur = lifecycle
-    cur.fetchone.return_value = None
+    cur.fetchall.return_value = []
     assert await service.get_pending_browser(13) is None
 
 

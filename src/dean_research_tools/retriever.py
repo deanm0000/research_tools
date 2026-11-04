@@ -21,7 +21,7 @@ from psycopg.sql import SQL
 from dean_research_tools import models
 from dean_research_tools.config import SettingsLike, load_settings
 from dean_research_tools.embeddings import EmbeddingsModel
-from dean_research_tools.lifecycle import Lifecycle, State
+from dean_research_tools.lifecycle import BrowserRequest, Lifecycle, State
 
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
@@ -70,6 +70,8 @@ class PGTools:
         self.embeddings = EmbeddingsModel(settings=self.settings)
         # self.research_task_id = research_task_id
         self.triggered_browser_use: tuple[str, Vector] | None = None
+        self.browser_requests: list[BrowserRequest] = []
+        self.browser_requests_started: int = 0
 
     @asynccontextmanager
     async def _get_conn(self):
@@ -457,7 +459,8 @@ class PGTools:
 
         Before using this tool, try to find official websites using the web_search
         tool first, then call browser_use giving it a that root url. Instruct it to find any pages it needs from that point.
-        If you want to ingest content from multiple sites, call browser_use multiple times (one per site).
+        For independent sites, make multiple browser_use calls in the same response
+        (one per site). They run in parallel, and research resumes after all finish.
 
         This agent ONLY collects and stores content - it does not read, summarize,
         analyze, or report on what it finds.
@@ -473,9 +476,14 @@ class PGTools:
         After ingestion, query the vector database using the returned browser_task_id to
         retrieve and reason over the content yourself.RETURN_DIRECT"""
 
+        ordinal = self.browser_requests_started
+        self.browser_requests_started += 1
         query_embedding = (
             await self.embeddings.embed_documents([objective])
         )[0]
+        self.browser_requests.append(BrowserRequest(
+            objective=objective, embedding=query_embedding, ordinal=ordinal,
+        ))
         self.triggered_browser_use = (objective, Vector(query_embedding))
         return "Browser task triggered."
 

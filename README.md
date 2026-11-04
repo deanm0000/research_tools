@@ -17,7 +17,7 @@ the document's original owning task, which may differ from the requested scope.
 Both semantic content and browser-task searches enforce `min_score` in SQL before
 applying `top_k`. Similarity thresholds must be between 0 and 1.
 
-## Trusted lifecycle APIs (0.13.0)
+## Trusted lifecycle APIs (0.14.0)
 
 `PGTools.queue_browser(research_task_id, state, objective, vector) -> int` is a
 programmatic compatibility API, **not an LLM tool**. Tool discovery iterates only
@@ -55,13 +55,18 @@ The service and return models are exported from `dean_research_tools`.
 
 ```python
 create_research(question, user_id, embedding, system_prompt=None) -> int
-start_research(research_task_id) -> ResearchStart
+start_research(research_task_id, *, recover_in_progress=False) -> ResearchStart
 create_browser(research_task_id, state, objective, vector) -> int
+create_browser_batch(research_id, state, requests) -> list[int]
 start_browser(browser_task_id) -> BrowserStart
 browser_progress(browser_task_id) -> BrowserProgress
 finish_browser(browser_task_id, history, usage) -> BrowserProgress
 get_browser_completion(browser_task_id) -> BrowserCompletion | None
 get_pending_browser(research_id) -> BrowserDispatch | None
+get_pending_browsers(research_id) -> list[BrowserDispatch]
+get_browser_continuation(browser_id) -> BrowserContinuation | None
+acknowledge_browser_continuation(batch_id) -> None
+accepts_continuation(research_id, batch_id) -> bool
 mark_research_error(research_id) -> None
 is_research_complete(research_id) -> bool
 finish_research(research_task_id, state, usage=None, report=None, *, summary=None) -> None
@@ -78,8 +83,10 @@ Properties `queued`, `done`, and `errored` alias the link counters.
 `links_terminal` means there are no queued links; it does **not** mean browser
 finalization has succeeded. `finished` checks the task status (`complete` or
 `error`), and `has_content` checks the text/image chunk counters.
-`pending_research_ids` includes paused tasks only when a stored completion exists
-and no links remain queued.
+`pending_research_ids` now includes only batches for which this browser is the
+elected publisher and publication is still pending. Finalization, not a progress
+read, elects that publisher after every member and its ingestion work is terminal.
+Use the continuation APIs to publish a batch-aware message and acknowledge sending.
 
 The browser worker must remain alive while `progress.queued > 0`, then call
 `finish_browser`. SQL validates readiness and normalizes success, partial success,
@@ -90,7 +97,7 @@ On a retry, check `get_browser_completion` **before** `start_browser`: an existi
 completion lets the worker retry research queue publication without rerunning
 browser automation or attempting to restart a completed task.
 
-On research retries, `get_pending_browser` checks for an existing paused handoff
+On research retries, `get_pending_browsers` checks every member of an existing paused handoff
 before starting research. Its root-exported `BrowserDispatch` has `task_id: int`,
 `status: str`, and `finished: bool` (a stored completion exists). This allows
 republication after browser queue send failure without creating another task or
@@ -98,6 +105,49 @@ resuming research prematurely. `mark_research_error` changes only `in_progress`
 research to `error`, leaving paused and completed tasks untouched.
 `is_research_complete` checks for stored research completion so duplicate
 continuation messages can be acknowledged without starting completed work.
+The singular `get_pending_browser` remains available for compatibility and prefers
+an unfinished member when a batch is pending.
+
+### Parallel browser collection and lifecycle
+
+Version 0.14 requires the worker repository's migration
+`006_parallel_browser_batches.sql`. Stop/drain old workers, apply the migration,
+then deploy this package and the updated worker together. The singleton creation
+entry points and standalone browsers remain supported; existing pauses are
+backfilled into singleton batches.
+
+`browser_use(objective)` retains its single-objective tool input. Independent calls
+in one model response are collected in `PGTools.browser_requests`, rather than
+overwriting one handoff. `browser_requests_started` lets the worker detect failed
+preparation and refuse a partial batch. Each `BrowserRequest` has `objective`,
+`embedding`, `ordinal`, and optional `tool_call_id`. Sort by `ordinal` after the
+tool round; embedding completions can arrive out of order. The worker associates
+model tool-call IDs before persistence. `triggered_browser_use` remains only as
+legacy singleton metadata; new workers must use the collection.
+
+`create_browser_batch` atomically persists the saved tool transcript, all browser
+tasks, and their ordered membership. It does not enqueue. Commit before publishing
+each task ID. Inspect `get_pending_browsers` after a partial publication failure;
+never recreate the batch to recover queue sends.
+
+`finish_browser` requires READ COMMITTED isolation and serializes finalizers using
+a shared batch-row lock before recording completion and checking siblings. Stored
+completions are immutable on retry. Once every browser has a stored result and no
+queued ingestion, exactly one durable publication intent is assigned to the final
+browser. `get_browser_continuation` returns its `batch_id` and `research_id`; publish
+`{"function":"researcher","payload":research_id,"batch_id":batch_id}`, then call
+`acknowledge_browser_continuation`. Failed publication must propagate so the
+browser's original message retries without repeating navigation.
+
+A send followed by an acknowledgment crash can duplicate delivery; this is
+at-least-once, not exactly-once. The worker must hold an exclusive research claim
+before checking `accepts_continuation` and running research. Busy claims must
+remain retryable to avoid losing a continuation delivered during initial dispatch.
+`start_research` restores all member outcomes and retains a durable resume
+checkpoint. Set `recover_in_progress=True` only while holding that exclusive claim
+to recover from process death; ordinary callers still cannot restart active work.
+Missing/failed browser infrastructure remains retryable rather than being silently
+classified as a terminal browser outcome.
 
 Creation requires an approved `user_id` and selects the configured researcher
 deployment. An explicit `system_prompt` creates and assigns a prompt record;
@@ -122,7 +172,8 @@ semantic browser-task lookup embeds retrieval queries as `search_query`.
 
 ```shell
 python -m pytest -q tests/test_browser_queries.py tests/test_func_args_sync.py \
-    tests/test_lifecycle.py tests/test_embeddings.py tests/test_queue_settings.py
+    tests/test_lifecycle.py tests/test_embeddings.py tests/test_queue_settings.py \
+    tests/test_browser_batches.py
 ```
 
 `tests/test_tools_locally.py` contains credential-dependent live integration

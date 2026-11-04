@@ -14,6 +14,8 @@ from dean_research_tools.retriever import PGTools
 @pytest.fixture
 def browser_tools():
     tools = object.__new__(PGTools)
+    tools.browser_requests = []
+    tools.browser_requests_started = 0
     tools.embeddings = SimpleNamespace(
         embed_search=AsyncMock(return_value=[0.1, 0.2]),
         embed_texts=AsyncMock(return_value=[[0.1, 0.2]]),
