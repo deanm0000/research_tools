@@ -7,9 +7,12 @@ from pgvector import Vector
 
 from dean_research_tools.lifecycle import (
     BrowserCompletion,
+    BrowserContinuation,
     BrowserDispatch,
     BrowserProgress,
     Lifecycle,
+    ResearchContinuation,
+    ResearchFinish,
     to_json_str,
 )
 
@@ -236,8 +239,13 @@ async def test_browser_completion_missing(lifecycle: tuple[Lifecycle, AsyncMock]
 @pytest.mark.parametrize("report", [None, "final report"])
 async def test_finish_research(lifecycle: tuple[Lifecycle, AsyncMock], report: str | None) -> None:
     service, cur = lifecycle
+    cur.fetchone.return_value = {
+        "final_status": "complete", "parent_research_id": None, "batch_id": None,
+        "reports_saved": 0,
+    }
     state = {"messages": [AIMessage(content="answer")]}
-    await service.finish_research(13, state, {"tokens": 7}, report, summary="Title")
+    result = await service.finish_research(13, state, {"tokens": 7}, report, summary="Title")
+    assert result == ResearchFinish(final_status="complete")
     sql, values = cur.execute.call_args.args
     assert "ai_proj.finish_research_task" in sql
     assert "finished AS MATERIALIZED" in sql
@@ -248,13 +256,35 @@ async def test_finish_research(lifecycle: tuple[Lifecycle, AsyncMock], report: s
     assert history["messages"][0]["content"] == "answer"
     assert history["usage"] == {"tokens": 7}
     assert "usage" not in state
-    assert values[3:] == ("Title", report, report)
+    assert values[3:] == ("Title", "complete", report, report)
     assert cur.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_finish_research_returns_parent_continuation(
+    lifecycle: tuple[Lifecycle, AsyncMock],
+) -> None:
+    service, cur = lifecycle
+    cur.fetchone.return_value = {
+        "final_status": "incomplete", "parent_research_id": 5, "batch_id": 9,
+        "reports_saved": 1,
+    }
+    result = await service.finish_research(
+        13, {"messages": []}, report="partial", terminal_status="incomplete",
+    )
+    assert result.final_status == "incomplete"
+    assert result.continuation == ResearchContinuation(batch_id=9, research_id=5)
+    assert isinstance(result.continuation, BrowserContinuation)
+    assert cur.execute.call_args.args[1][4] == "incomplete"
 
 
 @pytest.mark.asyncio
 async def test_finish_research_optional_usage(lifecycle: tuple[Lifecycle, AsyncMock]) -> None:
     service, cur = lifecycle
+    cur.fetchone.return_value = {
+        "final_status": "complete", "parent_research_id": None, "batch_id": None,
+        "reports_saved": 0,
+    }
     await service.finish_research(13, {"messages": []})
     assert orjson.loads(cur.execute.call_args.args[1][2]) == {"messages": []}
 
@@ -309,7 +339,7 @@ async def test_is_research_complete(
     assert await service.is_research_complete(13) == complete
     sql, values = cur.execute.call_args.args
     assert "SELECT EXISTS" in sql
-    assert "ai_proj.researcher_tasks_done WHERE id = %s" in sql
+    assert "status IN ('complete', 'incomplete')" in sql
     assert values == (13,)
 
 

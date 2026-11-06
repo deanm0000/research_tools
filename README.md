@@ -17,7 +17,7 @@ the document's original owning task, which may differ from the requested scope.
 Both semantic content and browser-task searches enforce `min_score` in SQL before
 applying `top_k`. Similarity thresholds must be between 0 and 1.
 
-## Trusted lifecycle APIs (0.14.0)
+## Trusted lifecycle APIs (0.15.0)
 
 `PGTools.queue_browser(research_task_id, state, objective, vector) -> int` is a
 programmatic compatibility API, **not an LLM tool**. Tool discovery iterates only
@@ -69,8 +69,43 @@ acknowledge_browser_continuation(batch_id) -> None
 accepts_continuation(research_id, batch_id) -> bool
 mark_research_error(research_id) -> None
 is_research_complete(research_id) -> bool
-finish_research(research_task_id, state, usage=None, report=None, *, summary=None) -> None
+finish_research(research_task_id, state, usage=None, report=None, *, summary=None,
+                terminal_status="complete") -> ResearchFinish
+# 0.15: research trees (worker migration 008)
+create_batch(research_id, state, browsers, children, triage=None) -> list[BatchMember]
+get_pending_members(research_id) -> list[PendingMember]
+get_research_continuation(research_id) -> ResearchContinuation | None
+get_research_node(research_id) -> ResearchNode
+get_children(research_id) -> list[ResearchChild]
+tree_cost(research_id) -> TreeCost
+tree_limits(research_id) -> TreeLimits
+record_research_usage(research_id, usage: list[ResearchUsage]) -> None
+save_research_triage(research_id, triage) -> None
+reopen_incomplete_tree(root_id) -> list[int]
 ```
+
+### Research trees (0.15)
+
+Version 0.15 requires the worker repository's migrations `008a_research_status_values.sql`
+and `008b_research_tree.sql`.
+
+- `create_batch` pauses research on browser requests and `SubresearchRequest`
+  children together. A `SubresearchRequest` has `question`, `embedding`, `ordinal`,
+  optional `tool_call_id`, `role` (`claim_check` or `subtask`), `context`, and
+  `standalone`. Ordinals are shared across both kinds. SQL enforces the depth,
+  per-batch, and per-tree caps, plus the cost cap.
+- `finish_research` returns `ResearchFinish(final_status, continuation)`.
+  `continuation` is a `ResearchContinuation` (a `BrowserContinuation` subclass) when
+  this task was the last unfinished member of its parent's batch; the caller then
+  resumes the parent. `terminal_status="incomplete"` marks work stopped at the cost
+  cap. A task with an incomplete child is always stored as incomplete.
+- `is_research_complete` is now status-based: `complete` or `incomplete`. Reopened
+  incomplete tasks keep their done row.
+- `acknowledge_browser_continuation` and `accepts_continuation` accept batches
+  published by either a browser or a child.
+- `TreeCost` (`cost`, `cost_cap_usd`, `unpriced_lines`, `over_cap`) and `TreeLimits`
+  (`spawn_allowance()`) let the worker check budgets before calling the model or
+  spawning children.
 
 `ResearchStart` exposes `starting_task`, `state` (nullable serialized state),
 `sys_prompt`, and `model` (deployment name string). `BrowserStart` exposes

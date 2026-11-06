@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, TypeAlias
+from decimal import Decimal
+from typing import Any, Literal, TypeAlias
 
 from pgvector import Vector
 from psycopg import AsyncConnection
@@ -65,6 +66,106 @@ class BrowserRequest(BaseModel):
 class BrowserContinuation(BaseModel):
     batch_id: int
     research_id: int
+
+
+class ResearchContinuation(BrowserContinuation):
+    """A finished subresearch task was elected to resume its parent's batch."""
+
+
+ResearchRole: TypeAlias = Literal["root", "claim_check", "subtask"]
+TerminalResearchStatus: TypeAlias = Literal["complete", "incomplete"]
+
+
+class SubresearchRequest(BaseModel):
+    question: str
+    embedding: list[float]
+    ordinal: int
+    tool_call_id: str | None = None
+    role: Literal["claim_check", "subtask"] = "subtask"
+    context: str | None = None
+    standalone: bool = False
+
+
+class BatchMember(BaseModel):
+    kind: Literal["browser", "subresearch"]
+    task_id: int
+    ordinal: int
+
+
+class PendingMember(BaseModel):
+    kind: Literal["browser", "subresearch"]
+    task_id: int
+    status: str
+    finished: bool
+
+
+class ResearchFinish(BaseModel):
+    final_status: TerminalResearchStatus
+    continuation: ResearchContinuation | None = None
+
+
+class ResearchNode(BaseModel):
+    id: int
+    starting_task: str
+    status: str
+    parent_id: int | None
+    root_id: int
+    depth: int
+    role: ResearchRole
+    context: str | None
+    standalone: bool
+    triage: dict[str, JsonValue] | None
+    user_id: str
+
+
+class ResearchChild(BaseModel):
+    id: int
+    starting_task: str
+    status: str
+    role: ResearchRole
+    standalone: bool
+    title: str | None
+
+
+class TreeCost(BaseModel):
+    root_id: int
+    cost: Decimal
+    cost_cap_usd: Decimal
+    unpriced_lines: int
+
+    @property
+    def over_cap(self) -> bool:
+        return self.cost >= self.cost_cap_usd
+
+
+class TreeLimits(BaseModel):
+    root_id: int
+    depth: int
+    max_depth: int
+    max_batch_children: int
+    tree_children: int
+    max_tree_children: int
+
+    @property
+    def can_spawn(self) -> bool:
+        return self.depth < self.max_depth and self.tree_children < self.max_tree_children
+
+    def spawn_allowance(self) -> int:
+        """How many children one new batch may still create."""
+        if self.depth >= self.max_depth:
+            return 0
+        return max(0, min(self.max_batch_children, self.max_tree_children - self.tree_children))
+
+
+class ResearchUsage(BaseModel):
+    """One model call's tokens; input_tokens excludes cached_input_tokens."""
+
+    deployment_name: str
+    flex: bool = False
+    input_tokens: int
+    cached_input_tokens: int = 0
+    output_tokens: int
+    purpose: str = "agent"
 
 
 class BrowserProgress(BaseModel):
@@ -161,7 +262,7 @@ class Lifecycle:
             await cur.execute(
                 """UPDATE ai_proj.research_browser_batches SET published_at=now()
                 WHERE batch_id=%s AND published_at IS NULL
-                  AND publisher_task_id IS NOT NULL""",
+                  AND (publisher_task_id IS NOT NULL OR publisher_research_id IS NOT NULL)""",
                 (batch_id,),
             )
 
@@ -172,8 +273,10 @@ class Lifecycle:
                     SELECT 1 FROM ai_proj.research_browser_batches b
                     JOIN ai_proj.researcher_tasks r ON r.id=b.research_id
                     WHERE b.batch_id=%s AND b.research_id=%s
-                      AND b.publisher_task_id IS NOT NULL
-                      AND r.status IN ('paused_for_browser','error','in_progress')
+                      AND (b.publisher_task_id IS NOT NULL
+                           OR b.publisher_research_id IS NOT NULL)
+                      AND r.status IN ('paused_for_browser','paused_for_subresearch',
+                                       'error','in_progress')
                       AND NOT EXISTS (
                         SELECT 1 FROM ai_proj.research_browser_batches newer
                         WHERE newer.research_id=b.research_id
@@ -204,12 +307,16 @@ class Lifecycle:
             )
 
     async def is_research_complete(self, research_id: int) -> bool:
-        """Check committed completion so duplicate continuations can be acknowledged."""
+        """Check for a committed terminal status (complete, or incomplete at the cost cap).
+
+        An incomplete task keeps its done row when reopened, so status is authoritative.
+        """
         async with self.conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 """
                 SELECT EXISTS (
-                    SELECT 1 FROM ai_proj.researcher_tasks_done WHERE id = %s
+                    SELECT 1 FROM ai_proj.researcher_tasks
+                    WHERE id = %s AND status IN ('complete', 'incomplete')
                 ) AS complete
                 """,
                 (research_id,),
@@ -424,17 +531,22 @@ class Lifecycle:
         report: str | None = None,
         *,
         summary: str | None = None,
-    ) -> None:
-        """Save completion and an optional report atomically, without LLM calls."""
+        terminal_status: TerminalResearchStatus = "complete",
+    ) -> ResearchFinish:
+        """Save completion and an optional report atomically, without LLM calls.
+
+        The returned continuation is set when this task was the last unfinished member of its
+        parent's batch; the caller must then resume the parent.
+        """
         completed_state = state if usage is None else {**state, "usage": usage}
-        async with self.conn.cursor() as cur:
+        async with self.conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 """
                 WITH finished AS MATERIALIZED (
-                    SELECT %s::bigint AS id,
-                        ai_proj.finish_research_task(
-                            %s::integer, %s::jsonb, %s::text
-                        ) AS result
+                    SELECT %s::bigint AS id, f.final_status, f.parent_research_id, f.batch_id
+                    FROM ai_proj.finish_research_task(
+                        %s::bigint, %s::jsonb, %s::text, %s::text
+                    ) f
                 ),
                 report_saved AS (
                     INSERT INTO ai_proj.researcher_reports (id, revision, content)
@@ -445,14 +557,172 @@ class Lifecycle:
                     FROM finished f WHERE %s::text IS NOT NULL
                     RETURNING id
                 )
-                SELECT f.id, (SELECT count(*) FROM report_saved) FROM finished f
+                SELECT f.final_status, f.parent_research_id, f.batch_id,
+                    (SELECT count(*) FROM report_saved) AS reports_saved
+                FROM finished f
                 """,
                 (
                     research_task_id,
                     research_task_id,
                     to_json_str(completed_state),
                     summary,
+                    terminal_status,
                     report,
                     report,
                 ),
             )
+            row = await cur.fetchone()
+        if row is None:
+            raise RuntimeError(f"Research task {research_task_id} was not finished")
+        continuation = None
+        if row["parent_research_id"] is not None:
+            continuation = ResearchContinuation(
+                batch_id=row["batch_id"], research_id=row["parent_research_id"],
+            )
+        return ResearchFinish(final_status=row["final_status"], continuation=continuation)
+
+    async def create_batch(
+        self,
+        research_id: int,
+        state: State,
+        browsers: list[BrowserRequest],
+        children: list[SubresearchRequest],
+        triage: dict[str, JsonValue] | None = None,
+    ) -> list[BatchMember]:
+        """Pause research on browser and/or subresearch members; SQL enforces tree caps."""
+        if len(browsers) + len(children) == 0:
+            raise ValueError("A batch must contain at least one request")
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """SELECT kind, task_id, ordinal FROM ai_proj.research_make_batch(
+                    %s::bigint,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb)""",
+                (
+                    research_id,
+                    to_json_str(state),
+                    TypeAdapter(list[BrowserRequest]).dump_json(browsers).decode(),
+                    TypeAdapter(list[SubresearchRequest]).dump_json(children).decode(),
+                    None if triage is None else to_json_str(triage),
+                ),
+            )
+            rows = await cur.fetchall()
+        return sorted(
+            (BatchMember.model_validate(row) for row in rows), key=lambda m: m.ordinal,
+        )
+
+    async def get_pending_members(self, research_id: int) -> list[PendingMember]:
+        """Members of the batch a paused research task is waiting on, in ordinal order."""
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """SELECT kind, task_id, status, finished FROM (
+                    SELECT m.ordinal, 'browser' AS kind, t.task_id, t.status::text AS status,
+                        (d.task_id IS NOT NULL) AS finished
+                    FROM ai_proj.research_task_pause p
+                    JOIN ai_proj.research_browser_members m USING (batch_id)
+                    JOIN ai_proj_browser.tasks t ON t.task_id=m.task_id
+                    LEFT JOIN ai_proj_browser.tasks_done d ON d.task_id=t.task_id
+                    WHERE p.research_id=%s
+                    UNION ALL
+                    SELECT c.ordinal, 'subresearch', r.id, r.status::text,
+                        r.status IN ('complete','incomplete')
+                    FROM ai_proj.research_task_pause p
+                    JOIN ai_proj.research_child_members c USING (batch_id)
+                    JOIN ai_proj.researcher_tasks r ON r.id=c.child_id
+                    WHERE p.research_id=%s
+                ) members ORDER BY ordinal""",
+                (research_id, research_id),
+            )
+            rows = await cur.fetchall()
+        return [PendingMember.model_validate(row) for row in rows]
+
+    async def get_research_continuation(
+        self, research_id: int,
+    ) -> ResearchContinuation | None:
+        """The unpublished parent batch this finished subresearch task was elected to resume."""
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """SELECT batch_id, research_id FROM ai_proj.research_browser_batches
+                WHERE publisher_research_id=%s AND published_at IS NULL
+                  AND resumed_at IS NULL
+                ORDER BY batch_id DESC LIMIT 1""",
+                (research_id,),
+            )
+            row = await cur.fetchone()
+        return None if row is None else ResearchContinuation.model_validate(row)
+
+    async def get_research_node(self, research_id: int) -> ResearchNode:
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """SELECT id, starting_task, status::text AS status, parent_id, root_id,
+                    depth, role, context, standalone, triage, user_id
+                FROM ai_proj.researcher_tasks WHERE id=%s""",
+                (research_id,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise LookupError(f"Research task {research_id} does not exist")
+        return ResearchNode.model_validate(row)
+
+    async def get_children(self, research_id: int) -> list[ResearchChild]:
+        """Direct subresearch tasks in creation order, with their saved titles."""
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """SELECT r.id, r.starting_task, r.status::text AS status, r.role,
+                    r.standalone, d.summary AS title
+                FROM ai_proj.researcher_tasks r
+                LEFT JOIN ai_proj.researcher_tasks_done d ON d.id=r.id
+                WHERE r.parent_id=%s ORDER BY r.id""",
+                (research_id,),
+            )
+            rows = await cur.fetchall()
+        return [ResearchChild.model_validate(row) for row in rows]
+
+    async def tree_cost(self, research_id: int) -> TreeCost:
+        """Spend of the whole tree containing this task, priced from model_costs."""
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT * FROM ai_proj.research_tree_cost(%s::bigint)", (research_id,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise LookupError(f"Research task {research_id} does not exist")
+        return TreeCost.model_validate(row)
+
+    async def tree_limits(self, research_id: int) -> TreeLimits:
+        async with self.conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT * FROM ai_proj.research_tree_limits(%s::bigint)", (research_id,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise LookupError(f"Research task {research_id} does not exist")
+        return TreeLimits.model_validate(row)
+
+    async def record_research_usage(
+        self, research_id: int, usage: list[ResearchUsage],
+    ) -> None:
+        if len(usage) == 0:
+            return
+        async with self.conn.cursor() as cur:
+            await cur.execute(
+                "SELECT ai_proj.record_research_usage(%s::bigint,%s::jsonb)",
+                (research_id, TypeAdapter(list[ResearchUsage]).dump_json(usage).decode()),
+            )
+
+    async def save_research_triage(
+        self, research_id: int, triage: dict[str, JsonValue],
+    ) -> None:
+        async with self.conn.cursor() as cur:
+            await cur.execute(
+                "SELECT ai_proj.save_research_triage(%s::bigint,%s::jsonb)",
+                (research_id, to_json_str(triage)),
+            )
+
+    async def reopen_incomplete_tree(self, root_id: int) -> list[int]:
+        """Reopen a capped tree after its cap was raised; returns task ids to dispatch."""
+        async with self.conn.cursor() as cur:
+            await cur.execute(
+                "SELECT research_id FROM ai_proj.reopen_incomplete_tree(%s::bigint)",
+                (root_id,),
+            )
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
