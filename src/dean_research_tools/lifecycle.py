@@ -493,10 +493,10 @@ class Lifecycle:
                     counts.total_links, counts.pending_links,
                     counts.done_links, counts.errored_links,
                     (SELECT count(*) FROM ai_proj_browser.text_content c
-                     JOIN ai_proj_browser.docs d USING (doc_id)
+                     JOIN ai_proj_browser.tasks_docs d USING (doc_id)
                      WHERE d.task_id = t.task_id) AS text_chunks,
                     (SELECT count(*) FROM ai_proj_browser.image_content c
-                     JOIN ai_proj_browser.docs d USING (doc_id)
+                     JOIN ai_proj_browser.tasks_docs d USING (doc_id)
                      WHERE d.task_id = t.task_id) AS image_chunks,
                     ARRAY(
                         SELECT b.research_id FROM ai_proj.research_browser_batches b

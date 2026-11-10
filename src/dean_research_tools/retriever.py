@@ -16,7 +16,8 @@ from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
-from psycopg.sql import SQL
+from psycopg.sql import SQL, Composed
+from psycopg.sql import Literal as SQLLiteral
 
 from dean_research_tools import models
 from dean_research_tools.config import SettingsLike, load_settings
@@ -26,6 +27,24 @@ from dean_research_tools.lifecycle import BrowserRequest, Lifecycle, State
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
 _registered_pgvector: WeakSet[AsyncConnection] = WeakSet()
+
+# Documents are shared between browser tasks through ai_proj_browser.tasks_docs.
+_TASK_SCOPE = SQL("""
+    AND EXISTS (
+        SELECT 1 FROM ai_proj_browser.tasks_docs scope
+        WHERE scope.task_id = %s AND scope.doc_id = bc.doc_id
+    )
+""")
+
+
+def _task_id_column(task_id: int | None) -> Composed:
+    """The scoped task, or the first task that used the document when unscoped."""
+    if task_id is not None:
+        return SQL("{}::bigint AS task_id").format(SQLLiteral(task_id))
+    return SQL(
+        "(SELECT min(td.task_id) FROM ai_proj_browser.tasks_docs td"
+        " WHERE td.doc_id = bc.doc_id) AS task_id"
+    ).format()
 
 
 def _to_pascal_inputs(s: str) -> str:
@@ -242,7 +261,7 @@ class PGTools:
                 SELECT %s::vector AS embedding
                 )
             SELECT
-                bt.task_id,
+                {task_id},
                 bc.chunk_id,
                 bc.doc_id,
                 bc.page,
@@ -253,9 +272,8 @@ class PGTools:
                 (1 - (bc.embedding <=> emb.embedding))::double precision AS score
             FROM ai_proj_browser.text_content bc
             INNER JOIN ai_proj_browser.docs bd using (doc_id)
-            INNER JOIN ai_proj_browser.tasks bt using (task_id)
             CROSS JOIN emb
-            """)
+            """).format(task_id=_task_id_column(browser_task_id))
         values: list[Vector | int | str | float] = [Vector(query_embedding), min_score]
         wheres = [
             SQL("""
@@ -266,15 +284,8 @@ class PGTools:
         ]
 
         if browser_task_id is not None:
-            wheres.append(SQL("""
-                AND (bt.task_id = %s OR EXISTS (
-                    SELECT 1 FROM ai_proj_browser.links scope_link
-                    WHERE scope_link.task_id = %s
-                      AND scope_link.doc_id = bc.doc_id
-                      AND scope_link.status = 'done'
-                ))
-            """))
-            values.extend([browser_task_id, browser_task_id])
+            wheres.append(_TASK_SCOPE)
+            values.append(browser_task_id)
 
         if doc_id is not None:
             wheres.append(SQL("AND bc.doc_id = %s "))
@@ -317,7 +328,7 @@ class PGTools:
 
         select = SQL("""
             SELECT
-                bt.task_id,
+                {task_id},
                 bc.chunk_id,
                 bc.doc_id,
                 bc.page,
@@ -327,8 +338,7 @@ class PGTools:
                 COALESCE(bd.title, '') AS title
             FROM ai_proj_browser.text_content bc
             INNER JOIN ai_proj_browser.docs bd using (doc_id)
-            INNER JOIN ai_proj_browser.tasks bt using (task_id)
-            """)
+            """).format(task_id=_task_id_column(task_id))
 
         wheres = [
             SQL("""
@@ -343,15 +353,8 @@ class PGTools:
         values: list[str | int | list[str] | list[int]] = [keywords]
 
         if task_id is not None:
-            wheres.append(SQL("""
-                AND (bt.task_id = %s OR EXISTS (
-                    SELECT 1 FROM ai_proj_browser.links scope_link
-                    WHERE scope_link.task_id = %s
-                      AND scope_link.doc_id = bc.doc_id
-                      AND scope_link.status = 'done'
-                ))
-            """))
-            values.extend([task_id, task_id])
+            wheres.append(_TASK_SCOPE)
+            values.append(task_id)
         if doc_id is not None:
             wheres.append(SQL("AND bc.doc_id = %s"))
             values.append(doc_id)
