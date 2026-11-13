@@ -168,6 +168,9 @@ async def test_browser_progress(lifecycle: tuple[Lifecycle, AsyncMock]) -> None:
     assert "ai_proj.research_task_pause" in sql
     assert "b.publisher_task_id=t.task_id" in sql
     assert "b.published_at IS NULL AND b.resumed_at IS NULL" in sql
+    assert sql.count("AND d.blake3 = c.blake3") == 2
+    assert sql.count("WHERE scope.task_id = t.task_id") == 2
+    assert "JOIN ai_proj_browser.tasks_docs d USING (doc_id)" not in sql
     assert values == (8,)
 
 

@@ -6,13 +6,23 @@ If a lot of people want to use it then that's fine, there's no secret sauce, but
 
 ## Browser database
 
-Browser queries use the `ai_proj_browser` schema. Content searches read
-`text_content`, join `docs` and `tasks` by `doc_id` and `task_id`, and return
+Version 0.17 requires the content-addressed `ai_proj_browser` schema:
+`doc_content.blake3` is the binary content key, `docs.blake3` is a nullable
+reference to it, and `text_content` / `image_content` reference it instead of
+`doc_id`. URL provenance stays in `docs`; `tasks_docs` and links remain doc-ID based.
+
+Content searches join chunks to document provenance through `blake3` and return
 `chunk_indx` as `chunk_index`. Image content is not included in these text searches.
-Task-scoped content queries include documents owned by the requested task and
-documents reused through its completed (`done`) links. An `EXISTS` filter avoids
-duplicating chunks when multiple links reuse a document. Returned `task_id` remains
-the document's original owning task, which may differ from the requested scope.
+Task-scoped searches consider only documents associated through `tasks_docs`,
+including documents reused through completed (`done`) links. Each chunk is returned
+once even when several associated URLs share its hash. The lowest matching `doc_id`
+provides deterministic URL/title/citation provenance; task, URL, and document filters
+are applied **before** choosing that source. Returned `task_id` is the requested
+scope, or the first task associated with the selected source for unscoped searches.
+`doc_id` filters and page filters keep their existing public API.
+
+`Lifecycle.browser_progress` likewise counts each text/image chunk once per task,
+regardless of how many associated source documents share that content.
 
 Both semantic content and browser-task searches enforce `min_score` in SQL before
 applying `top_k`. Similarity thresholds must be between 0 and 1.

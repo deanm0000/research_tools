@@ -60,17 +60,19 @@ async def test_semantic_content_query(browser_tools, filtered):
     sql = query.as_string()
 
     assert "FROM ai_proj_browser.text_content bc" in sql
-    assert "INNER JOIN ai_proj_browser.docs bd using (doc_id)" in sql
+    assert "INNER JOIN LATERAL" in sql
+    assert "WHERE bd.blake3 = bc.blake3" in sql
+    assert "ORDER BY bd.doc_id" in sql
     assert "ai_proj_browser.tasks bt" not in sql
     assert "bc.page" in sql
     assert "bc.chunk_indx AS chunk_index" in sql
     assert "ORDER BY bc.embedding <=> emb.embedding" in sql
     assert "(1 - (bc.embedding <=> emb.embedding))::double precision >= %s" in sql
-    assert values[1:] == ([0.7, 7, 9, "example", 3] if filtered else [0.7, 3])
+    assert values[1:] == ([7, 9, "example", 0.7, 3] if filtered else [0.7, 3])
     if filtered:
         assert "7::bigint AS task_id" in sql
-        assert "scope.task_id = %s AND scope.doc_id = bc.doc_id" in sql
-        assert "AND bc.doc_id = %s" in sql
+        assert "scope.task_id = %s AND scope.doc_id = bd.doc_id" in sql
+        assert "AND bd.doc_id = %s" in sql
         assert "AND bd.url ILIKE '%%' || %s || '%%'" in sql
     assert orjson.loads(result) == cursor.fetchall.return_value
 
@@ -85,15 +87,16 @@ async def test_keyword_content_query(browser_tools, filtered):
     sql = query.as_string()
 
     assert "FROM ai_proj_browser.text_content bc" in sql
-    assert "INNER JOIN ai_proj_browser.docs bd using (doc_id)" in sql
+    assert "INNER JOIN LATERAL" in sql
+    assert "WHERE bd.blake3 = bc.blake3" in sql
     assert "bc.chunk_indx AS chunk_index" in sql
     assert "FROM ai_proj_browser.tasks_docs scope" in sql
-    assert "ORDER BY bc.doc_id, bc.page, bc.chunk_indx" in sql
+    assert "ORDER BY bd.doc_id, bc.page, bc.chunk_indx, bc.chunk_id" in sql
     assert values == (
-        [["query"], 7, 9, [2], "example", 3] if filtered else [["query"], 7, 3]
+        [7, 9, "example", ["query"], [2], 3] if filtered else [7, ["query"], 3]
     )
     if filtered:
-        assert "AND bc.doc_id = %s" in sql
+        assert "AND bd.doc_id = %s" in sql
         assert "AND bc.page = ANY(%s)" in sql
         assert "AND bd.url ILIKE '%%' || %s || '%%'" in sql
 
@@ -117,7 +120,7 @@ async def test_task_scope_uses_shared_documents_without_join_duplicates(
     browser_tools: tuple[PGTools, AsyncMock], semantic: bool
 ) -> None:
     tools, cursor = browser_tools
-    reused_chunk = {"task_id": 1, "doc_id": 9, "text_chunk": "reused"}
+    reused_chunk = {"task_id": 7, "doc_id": 9, "text_chunk": "reused"}
     cursor.fetchall.return_value = [reused_chunk]
     if semantic:
         result = await tools.semantic_content_search("query", browser_task_id=7)
@@ -126,7 +129,7 @@ async def test_task_scope_uses_shared_documents_without_join_duplicates(
     query, values = cursor.execute.call_args.args
     sql = query.as_string()
     assert "SELECT 1 FROM ai_proj_browser.tasks_docs scope" in sql
-    assert "scope.task_id = %s AND scope.doc_id = bc.doc_id" in sql
+    assert "scope.task_id = %s AND scope.doc_id = bd.doc_id" in sql
     assert "JOIN ai_proj_browser.tasks_docs" not in sql
     assert values.count(7) == 1
     assert orjson.loads(result) == [reused_chunk]
@@ -272,4 +275,4 @@ async def test_unscoped_search_reports_first_task_using_document(browser_tools):
     query, _ = cursor.execute.call_args.args
     sql = query.as_string()
     assert "SELECT min(td.task_id) FROM ai_proj_browser.tasks_docs td" in sql
-    assert "WHERE td.doc_id = bc.doc_id) AS task_id" in sql
+    assert "WHERE td.doc_id = bd.doc_id) AS task_id" in sql

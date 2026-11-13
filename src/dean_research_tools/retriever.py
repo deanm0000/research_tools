@@ -32,7 +32,7 @@ _registered_pgvector: WeakSet[AsyncConnection] = WeakSet()
 _TASK_SCOPE = SQL("""
     AND EXISTS (
         SELECT 1 FROM ai_proj_browser.tasks_docs scope
-        WHERE scope.task_id = %s AND scope.doc_id = bc.doc_id
+        WHERE scope.task_id = %s AND scope.doc_id = bd.doc_id
     )
 """)
 
@@ -43,8 +43,37 @@ def _task_id_column(task_id: int | None) -> Composed:
         return SQL("{}::bigint AS task_id").format(SQLLiteral(task_id))
     return SQL(
         "(SELECT min(td.task_id) FROM ai_proj_browser.tasks_docs td"
-        " WHERE td.doc_id = bc.doc_id) AS task_id"
+        " WHERE td.doc_id = bd.doc_id) AS task_id"
     ).format()
+
+
+def _content_source(
+    task_id: int | None, doc_id: int | None, url_part: str | None
+) -> tuple[Composed, list[int | str]]:
+    """Choose one matching provenance row per hash before limiting chunks."""
+    filters = [SQL("WHERE bd.blake3 = bc.blake3")]
+    values: list[int | str] = []
+    if task_id is not None:
+        filters.append(_TASK_SCOPE)
+        values.append(task_id)
+    if doc_id is not None:
+        filters.append(SQL("AND bd.doc_id = %s"))
+        values.append(doc_id)
+    if url_part is not None:
+        filters.append(SQL("AND bd.url ILIKE '%%' || %s || '%%'"))
+        values.append(url_part)
+    return (
+        SQL("""
+            INNER JOIN LATERAL (
+                SELECT bd.doc_id, bd.url, bd.title
+                FROM ai_proj_browser.docs bd
+                {filters}
+                ORDER BY bd.doc_id
+                LIMIT 1
+            ) bd ON TRUE
+        """).format(filters=SQL(" ").join(filters)),
+        values,
+    )
 
 
 def _to_pascal_inputs(s: str) -> str:
@@ -263,7 +292,7 @@ class PGTools:
             SELECT
                 {task_id},
                 bc.chunk_id,
-                bc.doc_id,
+                bd.doc_id,
                 bc.page,
                 bc.chunk_indx AS chunk_index,
                 bc.text_chunk,
@@ -271,10 +300,16 @@ class PGTools:
                 COALESCE(bd.title, '') AS title,
                 (1 - (bc.embedding <=> emb.embedding))::double precision AS score
             FROM ai_proj_browser.text_content bc
-            INNER JOIN ai_proj_browser.docs bd using (doc_id)
+            {source}
             CROSS JOIN emb
-            """).format(task_id=_task_id_column(browser_task_id))
-        values: list[Vector | int | str | float] = [Vector(query_embedding), min_score]
+            """)
+        source, source_values = _content_source(browser_task_id, doc_id, url_part)
+        select = select.format(
+            task_id=_task_id_column(browser_task_id), source=source
+        )
+        values: list[Vector | int | str | float] = [
+            Vector(query_embedding), *source_values, min_score
+        ]
         wheres = [
             SQL("""
             WHERE bc.embedding IS NOT NULL
@@ -283,20 +318,9 @@ class PGTools:
             """)
         ]
 
-        if browser_task_id is not None:
-            wheres.append(_TASK_SCOPE)
-            values.append(browser_task_id)
-
-        if doc_id is not None:
-            wheres.append(SQL("AND bc.doc_id = %s "))
-            values.append(doc_id)
-
-        if url_part is not None:
-            wheres.append(SQL("AND bd.url ILIKE '%%' || %s || '%%'"))
-            values.append(url_part)
-
         limit = SQL("""
-            ORDER BY bc.embedding <=> emb.embedding
+            ORDER BY bc.embedding <=> emb.embedding,
+                bd.doc_id, bc.page, bc.chunk_indx, bc.chunk_id
             LIMIT %s
             """)
         values.append(top_k)
@@ -317,28 +341,30 @@ class PGTools:
     ) -> str:
         """Search for relevant text content in ai_proj_browser.text_content using keywords, it is case-insensitive.
         Must provide either a task_id or url_part to filter results."""
-        if not keywords:
+        if len(keywords) == 0:
             return "keywords must not be empty"
-        if not task_id and not url_part:
+        if task_id is None and (url_part is None or len(url_part) == 0):
             return "Either task_id or url_part must be provided"
         if top_k < 1:
             return "top_k must be >= 1"
-        if pages and not doc_id:
+        if pages is not None and len(pages) > 0 and doc_id is None:
             return "doc_id must be provided if pages are specified"
 
         select = SQL("""
             SELECT
                 {task_id},
                 bc.chunk_id,
-                bc.doc_id,
+                bd.doc_id,
                 bc.page,
                 bc.chunk_indx AS chunk_index,
                 bc.text_chunk,
                 COALESCE(bd.url, '') AS url,
                 COALESCE(bd.title, '') AS title
             FROM ai_proj_browser.text_content bc
-            INNER JOIN ai_proj_browser.docs bd using (doc_id)
-            """).format(task_id=_task_id_column(task_id))
+            {source}
+            """)
+        source, source_values = _content_source(task_id, doc_id, url_part)
+        select = select.format(task_id=_task_id_column(task_id), source=source)
 
         wheres = [
             SQL("""
@@ -350,23 +376,14 @@ class PGTools:
               )
         """)
         ]
-        values: list[str | int | list[str] | list[int]] = [keywords]
+        values: list[str | int | list[str] | list[int]] = [*source_values, keywords]
 
-        if task_id is not None:
-            wheres.append(_TASK_SCOPE)
-            values.append(task_id)
-        if doc_id is not None:
-            wheres.append(SQL("AND bc.doc_id = %s"))
-            values.append(doc_id)
-            if pages:
-                wheres.append(SQL("AND bc.page = ANY(%s)"))
-                values.append(pages)
-        if url_part is not None:
-            wheres.append(SQL("AND bd.url ILIKE '%%' || %s || '%%'"))
-            values.append(url_part)
+        if pages is not None and len(pages) > 0:
+            wheres.append(SQL("AND bc.page = ANY(%s)"))
+            values.append(pages)
 
         limit = SQL("""
-                    ORDER BY bc.doc_id, bc.page, bc.chunk_indx
+                    ORDER BY bd.doc_id, bc.page, bc.chunk_indx, bc.chunk_id
                     LIMIT %s
                     """)
         values.append(top_k)
